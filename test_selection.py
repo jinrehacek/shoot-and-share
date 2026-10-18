@@ -1,6 +1,7 @@
 import unittest
 
-from selection import Output, Rect, crop_plan, drag, hit_test, nudge, span_within
+from selection import (Output, Rect, centered_span, cover_pixels, crop_plan, drag, hit_test, nudge,
+                       place_toolbar, span_within)
 
 # The laptop layout: a 1x laptop panel and a 1.25x monitor to its right.
 LAPTOP = Output('eDP-1', Rect(0, 0, 1920, 1200), 1920, 1200)
@@ -42,9 +43,39 @@ class Drag(unittest.TestCase):
     def test_new_selection_crosses_monitors(self):
         self.assertEqual(span_within(1800, 50, 2000.4, -40, BOUNDS), Rect(1800, 0, 200, 50))
 
+    def test_ctrl_resizes_around_the_center(self):
+        self.assertEqual(drag('e', self.start, 50, 0, BOUNDS, centered=True), Rect(50, 100, 300, 100))
+        self.assertEqual(drag('se', self.start, -50, 20, BOUNDS, centered=True), Rect(150, 80, 100, 140))
+        self.assertEqual(drag('w', self.start, 150, 0, BOUNDS, centered=True), Rect(150, 100, 100, 100))
+
+    def test_centered_span_shrinks_evenly_at_the_desktop_edge(self):
+        self.assertEqual(centered_span(30, 600, 100, 50, BOUNDS), Rect(0, 550, 60, 100))
+
     def test_keyboard_resize(self):
         self.assertEqual(nudge(self.start, -10, 1, True, BOUNDS), Rect(100, 100, 190, 101))
         self.assertEqual(nudge(self.start, -10, 1, False, BOUNDS), Rect(90, 101, 200, 100))
+
+
+class CoverPixels(unittest.TestCase):
+    def test_rounds_outward_at_fractional_scale(self):
+        self.assertEqual(cover_pixels(Rect(1, 1, 2, 2), 1.25, 1.25), (1, 1, 3, 3))
+
+    def test_exact_at_whole_scale(self):
+        self.assertEqual(cover_pixels(Rect(4, 6, 10, 20), 1, 1), (4, 6, 10, 20))
+
+
+class Toolbar(unittest.TestCase):
+    def test_below_the_selection(self):
+        self.assertEqual(place_toolbar(Rect(100, 100, 300, 200), [LAPTOP, MONITOR], 400, 42),
+                         Rect(100, 310, 400, 42))
+
+    def test_inside_when_no_room_below(self):
+        self.assertEqual(place_toolbar(Rect(100, 900, 300, 290), [LAPTOP, MONITOR], 400, 42),
+                         Rect(100, 1138, 400, 42))
+
+    def test_stays_on_the_output_horizontally(self):
+        self.assertEqual(place_toolbar(Rect(3300, 100, 100, 100), [LAPTOP, MONITOR], 400, 42),
+                         Rect(3056, 210, 400, 42))
 
 
 class CropPlan(unittest.TestCase):

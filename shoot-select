@@ -2,8 +2,15 @@
 """Freeze every screen, select a region with resizable handles, and save it as PNG.
 
 Drag anywhere to select, on any monitor. Drag the edges or corners to resize,
-drag the inside to move, or drag outside to start again. Arrow keys move the
-selection by one pixel; Shift+arrows resize it; Ctrl makes steps of ten.
+drag the inside to move, or drag outside to start again. Hold Ctrl while
+dragging to resize around the center. Arrow keys move the selection by one
+pixel; Shift+arrows resize it; Ctrl makes steps of ten.
+
+The toolbar under the selection hides things before saving: Box (R) covers a
+rectangle, Brush (B) paints freehand, and Pick (I) takes a color from the
+screen so a cover can match its background. V returns to adjusting the
+selection, 1-4 choose a color, [ ] or the scroll wheel size the brush, and
+Ctrl+Z undoes.
 
 Enter, Space, or a double-click inside saves the PNG, copies it to the
 clipboard, and prints "share". Ctrl+C only copies it and prints "copy".
@@ -16,7 +23,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from selection import MIN_NEW_SIZE, Output, Rect, crop_plan, drag, hit_test, nudge, span_within
+from selection import (MIN_NEW_SIZE, Box, Output, Rect, Stroke, centered_span, clamp, crop_plan, drag,
+                       hit_test, nudge, place_toolbar, span_within)
 
 LAYER_SHELL = 'libgtk4-layer-shell.so.0'
 CANCELLED = 1
@@ -43,6 +51,8 @@ gi.require_version('Gtk4LayerShell', '1.0')
 from gi.repository import Gdk, GdkPixbuf, GLib, Graphene, Gsk, Gtk  # noqa: E402
 from gi.repository import Gtk4LayerShell as LayerShell  # noqa: E402
 
+from render import render  # noqa: E402
+
 DIM = Gdk.RGBA(red=0, green=0, blue=0, alpha=.45)
 ACCENT = Gdk.RGBA(red=.50, green=.78, blue=1, alpha=1)
 HANDLE = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
@@ -50,7 +60,24 @@ LABEL_BACKGROUND = Gdk.RGBA(red=.08, green=.08, blue=.1, alpha=.85)
 LABEL_TEXT = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
 BORDER = 2
 HANDLE_SIZE = 9
-HINT = 'Drag to select  ·  Enter share  ·  Ctrl+C copy  ·  Esc cancel'
+HINT = 'Drag to select  ·  Ctrl from center  ·  Enter share  ·  Ctrl+C copy  ·  Esc cancel'
+WHITE = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
+BLACK = Gdk.RGBA(red=0, green=0, blue=0, alpha=1)
+ACTIVE_BUTTON = Gdk.RGBA(red=.50, green=.78, blue=1, alpha=.35)
+HOVER_BUTTON = Gdk.RGBA(red=1, green=1, blue=1, alpha=.12)
+SWATCH_RING = Gdk.RGBA(red=.6, green=.6, blue=.65, alpha=1)
+
+# Toolbar: (tool, icon, tooltip). Colors follow, then undo.
+TOOLS = (('select', 'view-fullscreen-symbolic', 'Adjust selection  V'),
+         ('box', 'media-playback-stop-symbolic', 'Box  R  ·  Ctrl from center'),
+         ('brush', 'document-edit-symbolic', 'Brush  B  ·  [ ] or scroll to size'),
+         ('pick', 'color-select-symbolic', 'Pick a color from the screen  I'))
+ICONS = {tool: icon for tool, icon, _ in TOOLS}
+TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_i: 'pick'}
+COLORS = ((0, 0, 0), (1, 1, 1), (.86, .2, .2))  # The picked color is the fourth swatch.
+COLOR_NAMES = ('Black', 'White', 'Red', 'Picked color')
+BUTTON, GAP, PADDING, SEPARATOR = 32, 2, 5, 10
+BRUSH_SIZES = (2, 400)
 
 CURSORS = {
     None: 'crosshair', 'move': 'move',
@@ -69,6 +96,26 @@ def push_rounded(snapshot, bounds, radius):
     clip = Gsk.RoundedRect()
     clip.init_from_rect(bounds, radius)
     snapshot.push_rounded_clip(clip)
+
+
+def rgba(color):
+    return Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=1)
+
+
+def stroke_path(points):
+    builder = Gsk.PathBuilder.new()
+    (x, y), *rest = points
+    builder.move_to(x, y)
+    for x, y in rest or [(x + .01, y)]:  # A single click still leaves a dot.
+        builder.line_to(x, y)
+    return builder.to_path()
+
+
+def round_stroke(width):
+    stroke = Gsk.Stroke.new(width)
+    stroke.set_line_cap(Gsk.LineCap.ROUND)
+    stroke.set_line_join(Gsk.LineJoin.ROUND)
+    return stroke
 
 
 def capture(monitors):
@@ -93,23 +140,6 @@ def texture_for(pixbuf):
                                  pixbuf.read_pixel_bytes(), pixbuf.get_rowstride())
 
 
-def render(selection, outputs, pixbufs):
-    width, height, pieces = crop_plan(selection, outputs)
-    if len(pieces) == 1 and (pieces[0][1][2:] == pieces[0][2][2:]):
-        name, (sx, sy, w, h), _ = pieces[0]
-        return pixbufs[name].new_subpixbuf(sx, sy, w, h).copy()
-    # Areas outside every monitor stay transparent.
-    result = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, width, height)
-    result.fill(0)
-    for name, (sx, sy, sw, sh), (dx, dy, dw, dh) in pieces:
-        scale_x, scale_y = dw / sw, dh / sh
-        same = scale_x == 1 and scale_y == 1
-        pixbufs[name].scale(result, dx, dy, dw, dh, dx - sx * scale_x, dy - sy * scale_y,
-                            scale_x, scale_y,
-                            GdkPixbuf.InterpType.NEAREST if same else GdkPixbuf.InterpType.BILINEAR)
-    return result
-
-
 class Session:
     def __init__(self, outputs, pixbufs, initial):
         self.outputs, self.pixbufs = outputs, pixbufs
@@ -117,11 +147,139 @@ class Session:
         for output in outputs[1:]:
             self.bounds = self.bounds.union(output.rect)
         self.selection = initial
-        self.dragging = None  # (zone, selection when the drag began, start x, start y)
+        # zone, selection when the drag began, start point, latest offsets.
+        self.dragging = None
+        self.pointer = None  # Global logical point.
         self.pointer_output = outputs[0]
+        self.tool, self.draw_tool = 'select', 'box'
+        self.color_index, self.picked = 0, (.5, .5, .5)
+        self.brush = 16
+        self.annotations, self.current = [], None
         self.canvases, self.windows = [], []
+        self.icons = {}
         self.action = None
         self.loop = GLib.MainLoop()
+
+    @property
+    def color(self):
+        return (*COLORS, self.picked)[self.color_index]
+
+    def set_tool(self, tool):
+        self.tool = tool
+        if tool in ('box', 'brush'):
+            self.draw_tool = tool
+        self.redraw()
+
+    def drawing(self):
+        """Whether a drag should paint instead of changing the selection."""
+        return self.selection and self.tool in ('box', 'brush')
+
+    def pixel_at(self, x, y):
+        for output in self.outputs:
+            if output.rect.contains(x, y):
+                pixel_x = min(int((x - output.rect.x) * output.scale), output.pixel_w - 1)
+                pixel_y = min(int((y - output.rect.y) * output.pixel_h / output.rect.h), output.pixel_h - 1)
+                data = self.pixbufs[output.name].new_subpixbuf(pixel_x, pixel_y, 1, 1).copy().get_pixels()
+                return tuple(channel / 255 for channel in data[:3])
+        return None
+
+    def pick(self, x, y):
+        color = self.pixel_at(x, y)
+        if color:
+            self.picked, self.color_index = color, len(COLORS)
+            self.set_tool(self.draw_tool)
+
+    def undo(self):
+        if self.annotations:
+            self.annotations.pop()
+            self.redraw()
+
+    def toolbar(self):
+        """Toolbar items with their global rectangles, or nothing without a selection."""
+        if not self.selection:
+            return []
+        layout = [('tool', name) for name, _, _ in TOOLS] + [None]
+        layout += [('color', index) for index in range(len(COLORS) + 1)] + [None, ('undo',)]
+        width = 2 * PADDING + sum(SEPARATOR if item is None else BUTTON + GAP for item in layout) - GAP
+        box = place_toolbar(self.selection, self.outputs, width, BUTTON + 2 * PADDING)
+        items, x = [(('toolbar',), box)], box.x + PADDING
+        for item in layout:
+            if item is None:
+                x += SEPARATOR
+            else:
+                items.append((item, Rect(x, box.y + PADDING, BUTTON, BUTTON)))
+                x += BUTTON + GAP
+        return items
+
+    def toolbar_item_at(self, x, y):
+        """The toolbar entry under a point; the toolbar background counts too."""
+        hit = None
+        for item, area in self.toolbar():
+            if area.contains(x, y):
+                hit = item
+        return hit
+
+    def activate(self, item):
+        if item[0] == 'tool':
+            self.set_tool(item[1])
+        elif item[0] == 'color':
+            self.color_index = item[1]
+            if self.tool not in ('box', 'brush'):
+                self.set_tool(self.draw_tool)
+            self.redraw()
+        elif item[0] == 'undo':
+            self.undo()
+
+    def begin_drag(self, x, y):
+        item = self.toolbar_item_at(x, y)
+        if item:
+            self.activate(item)
+            zone = 'ignore'
+        elif self.tool == 'pick':
+            self.pick(x, y)
+            zone = 'ignore'
+        elif self.drawing():
+            zone = self.tool
+        else:
+            zone = hit_test(self.selection, x, y) or 'new'
+        self.dragging = dict(zone=zone, start=self.selection, x=x, y=y, dx=0, dy=0)
+        if zone == 'brush':
+            self.current = Stroke([(x, y)], self.brush, self.color)
+            self.redraw()
+
+    def update_drag(self, dx, dy, centered):
+        drag_state = self.dragging
+        drag_state.update(dx=dx, dy=dy)
+        zone, x, y = drag_state['zone'], drag_state['x'], drag_state['y']
+        if zone in ('new', 'box'):
+            area = (centered_span(x, y, abs(dx), abs(dy), self.bounds) if centered
+                    else span_within(x, y, x + dx, y + dy, self.bounds))
+            if zone == 'new':
+                self.selection = area
+            else:
+                self.current = Box(area, self.color)
+        elif zone == 'brush':
+            self.current.points.append((x + dx, y + dy))
+        elif zone != 'ignore':
+            self.selection = drag(zone, drag_state['start'], dx, dy, self.bounds, centered)
+        self.redraw()
+
+    def end_drag(self):
+        zone, start = self.dragging['zone'], self.dragging['start']
+        self.dragging = None
+        selection = self.selection
+        if zone == 'new' and (selection is None or min(selection.w, selection.h) < MIN_NEW_SIZE):
+            self.selection = start
+        elif zone == 'box' and self.current and self.current.rect.w and self.current.rect.h:
+            self.annotations.append(self.current)
+        elif zone == 'brush' and self.current:
+            self.annotations.append(Stroke(tuple(self.current.points), self.current.width, self.current.color))
+        self.current = None
+        self.redraw()
+
+    def adjusting(self):
+        """Whether the selection itself is being dragged; the toolbar hides meanwhile."""
+        return self.dragging and self.dragging['zone'] not in ('ignore', 'box', 'brush')
 
     def redraw(self):
         for canvas in self.canvases:
@@ -134,6 +292,12 @@ class Session:
     def size_label(self):
         width, height, _ = crop_plan(self.selection, self.outputs)
         return f'{width} × {height}'
+
+    def icon(self, name):
+        if name not in self.icons:
+            theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+            self.icons[name] = theme.lookup_icon(name, None, 16, 2, Gtk.TextDirection.NONE, 0)
+        return self.icons[name]
 
     def finish(self, action):
         # Ignore confirmation without a selection or with one in a gap between monitors.
@@ -166,43 +330,61 @@ class Canvas(Gtk.Widget):
         motion.connect('motion', self.on_motion)
         self.add_controller(motion)
 
+        scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
+                                           | Gtk.EventControllerScrollFlags.DISCRETE)
+        scroll.connect('scroll', self.on_scroll)
+        self.add_controller(scroll)
+
     def global_point(self, x, y):
         return self.output.rect.x + x, self.output.rect.y + y
 
     def on_motion(self, _controller, x, y):
-        self.session.pointer_output = self.output
-        if not self.session.dragging:
-            self.set_cursor_from_name(CURSORS[hit_test(self.session.selection, *self.global_point(x, y))])
+        session = self.session
+        session.pointer_output = self.output
+        session.pointer = point = self.global_point(x, y)
+        if session.toolbar_item_at(*point):
+            cursor = 'pointer'
+        elif session.tool == 'brush' and session.selection:
+            cursor = 'none'  # The brush outline replaces the pointer.
+        elif session.drawing() or session.tool == 'pick':
+            cursor = 'crosshair'
+        elif session.dragging:
+            return
+        else:
+            cursor = CURSORS[hit_test(session.selection, *point)]
+        self.set_cursor_from_name(cursor)
+        if session.selection:
+            session.redraw()  # Toolbar hover, brush outline, and color preview follow the pointer.
 
     def on_drag_begin(self, _gesture, x, y):
-        gx, gy = self.global_point(x, y)
-        session = self.session
-        session.dragging = (hit_test(session.selection, gx, gy) or 'new', session.selection, gx, gy)
+        self.session.begin_drag(*self.global_point(x, y))
 
-    def on_drag_update(self, _gesture, dx, dy):
-        session = self.session
-        zone, start, gx, gy = session.dragging
-        if zone == 'new':
-            session.set_selection(span_within(gx, gy, gx + dx, gy + dy, session.bounds))
-        else:
-            session.set_selection(drag(zone, start, dx, dy, session.bounds))
+    def on_drag_update(self, gesture, dx, dy):
+        centered = bool(gesture.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK)
+        self.session.update_drag(dx, dy, centered)
 
     def on_drag_end(self, _gesture, _dx, _dy):
-        session = self.session
-        zone, start, _, _ = session.dragging
-        session.dragging = None
-        selection = session.selection
-        if zone == 'new' and (selection is None or min(selection.w, selection.h) < MIN_NEW_SIZE):
-            session.set_selection(start)
+        self.session.end_drag()
 
     def on_click(self, gesture, presses, x, y):
         session = self.session
+        point = self.global_point(x, y)
+        if session.toolbar_item_at(*point) or session.tool != 'select':
+            return
         button = gesture.get_current_button()
         if button == Gdk.BUTTON_SECONDARY:
             session.set_selection(None)
         elif (button == Gdk.BUTTON_PRIMARY and presses == 2 and session.selection
-              and session.selection.contains(*self.global_point(x, y))):
+              and session.selection.contains(*point)):
             session.finish('share')
+
+    def on_scroll(self, _controller, _dx, dy):
+        session = self.session
+        if session.tool != 'brush':
+            return False
+        session.brush = clamp(round(session.brush * (1.15 if dy < 0 else 1 / 1.15)), *BRUSH_SIZES)
+        session.redraw()
+        return True
 
     def on_key(self, _controller, keyval, _keycode, state):
         session = self.session
@@ -216,13 +398,37 @@ class Canvas(Gtk.Widget):
             session.finish('copy')
         elif control and keyval in (Gdk.KEY_a, Gdk.KEY_A):
             session.set_selection(session.pointer_output.rect)
+        elif control and keyval in (Gdk.KEY_z, Gdk.KEY_Z):
+            session.undo()
+        elif keyval in (Gdk.KEY_Control_L, Gdk.KEY_Control_R):
+            self.on_control(True)
         elif keyval in ARROWS and session.selection:
             dx, dy = ARROWS[keyval]
             step = 10 if control else 1
             session.set_selection(nudge(session.selection, dx * step, dy * step, shift, session.bounds))
+        elif control:
+            return False
+        elif Gdk.keyval_to_lower(keyval) in TOOL_KEYS:
+            session.set_tool(TOOL_KEYS[Gdk.keyval_to_lower(keyval)])
+        elif Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(COLORS) + 1:
+            session.activate(('color', keyval - Gdk.KEY_1))
+        elif keyval in (Gdk.KEY_bracketleft, Gdk.KEY_bracketright):
+            factor = 1.25 if keyval == Gdk.KEY_bracketright else 1 / 1.25
+            session.brush = clamp(round(session.brush * factor), *BRUSH_SIZES)
+            session.redraw()
         else:
             return False
         return True
+
+    def on_key_released(self, _controller, keyval, _keycode, _state):
+        if keyval in (Gdk.KEY_Control_L, Gdk.KEY_Control_R):
+            self.on_control(False)
+
+    def on_control(self, held):
+        """Pressing or releasing Ctrl mid-drag switches centered resizing at once."""
+        drag_state = self.session.dragging
+        if drag_state and drag_state['zone'] not in ('ignore', 'brush', 'move'):
+            self.session.update_drag(drag_state['dx'], drag_state['dy'], held)
 
     def do_snapshot(self, snapshot):
         session, area = self.session, self.output.rect
@@ -230,6 +436,8 @@ class Canvas(Gtk.Widget):
         snapshot.translate(Graphene.Point().init(-area.x, -area.y))
         snapshot.append_scaled_texture(self.texture, Gsk.ScalingFilter.NEAREST,
                                        rect(area.x, area.y, area.w, area.h))
+        for annotation in [*session.annotations, *filter(None, [session.current])]:
+            self.draw_annotation(snapshot, annotation)
         selection = session.selection
         visible = selection and selection.intersect(area)
         if not visible:
@@ -242,15 +450,88 @@ class Canvas(Gtk.Widget):
                 if part.w > 0 and part.h > 0:
                     snapshot.append_color(DIM, rect(part.x, part.y, part.w, part.h))
         if selection:
-            self.draw_frame(snapshot, selection)
+            self.draw_frame(snapshot, selection, handles=session.tool == 'select')
             self.draw_label(snapshot, session.size_label(), selection.x, selection.y - 8, above=True)
+            if not session.adjusting():
+                self.draw_toolbar(snapshot)
+            self.draw_tool_preview(snapshot)
         elif not session.dragging:
             layout = self.create_pango_layout(HINT)
             width, height = layout.get_pixel_size()
             self.draw_label(snapshot, HINT, area.x + (area.w - width) / 2,
                             area.y + (area.h - height) / 2, above=False)
 
-    def draw_frame(self, snapshot, selection):
+    def draw_annotation(self, snapshot, annotation):
+        if isinstance(annotation, Box):
+            r = annotation.rect
+            snapshot.append_color(rgba(annotation.color), rect(r.x, r.y, r.w, r.h))
+        else:
+            snapshot.append_stroke(stroke_path(annotation.points), round_stroke(annotation.width),
+                                   rgba(annotation.color))
+
+    def draw_toolbar(self, snapshot):
+        session = self.session
+        items = session.toolbar()
+        hovered = session.pointer and session.toolbar_item_at(*session.pointer)
+        _, box = items[0]
+        bounds = rect(box.x, box.y, box.w, box.h)
+        push_rounded(snapshot, bounds, 10)
+        snapshot.append_color(LABEL_BACKGROUND, bounds)
+        snapshot.pop()
+        tooltip = None
+        for item, area in items[1:]:
+            bounds = rect(area.x, area.y, area.w, area.h)
+            active = (item == ('tool', session.tool)
+                      or (item[0] == 'color' and item[1] == session.color_index and session.tool != 'select'))
+            if item[0] != 'color' and (active or item == hovered):
+                push_rounded(snapshot, bounds, 7)
+                snapshot.append_color(ACTIVE_BUTTON if active else HOVER_BUTTON, bounds)
+                snapshot.pop()
+            if item[0] == 'color':
+                center_x, center_y = area.x + area.w / 2, area.y + area.h / 2
+                ring = 24 if active else 20 if item == hovered else 18
+                self.dot(snapshot, ACCENT if active else SWATCH_RING, center_x - ring / 2, center_y - ring / 2, ring)
+                self.dot(snapshot, rgba((*COLORS, session.picked)[item[1]]), center_x - 8, center_y - 8, 16)
+            else:
+                name = 'edit-undo-symbolic' if item[0] == 'undo' else ICONS[item[1]]
+                faded = item[0] == 'undo' and not session.annotations
+                snapshot.save()
+                snapshot.translate(Graphene.Point().init(area.x + 8, area.y + 8))
+                if faded:
+                    snapshot.push_opacity(.35)
+                session.icon(name).snapshot_symbolic(snapshot, 16, 16, [WHITE, WHITE, WHITE, WHITE])
+                if faded:
+                    snapshot.pop()
+                snapshot.restore()
+            if item == hovered:
+                tooltip = (item, area)
+        if tooltip:
+            item, area = tooltip
+            text = {'tool': lambda: next(tip for tool, _, tip in TOOLS if tool == item[1]),
+                    'color': lambda: f'{COLOR_NAMES[item[1]]}  {item[1] + 1}',
+                    'undo': lambda: 'Undo  Ctrl+Z'}[item[0]]()
+            self.draw_label(snapshot, text, area.x, box.bottom + 6, above=False)
+
+    def draw_tool_preview(self, snapshot):
+        session = self.session
+        if not session.pointer or session.dragging and session.dragging['zone'] == 'ignore':
+            return
+        x, y = session.pointer
+        if session.toolbar_item_at(x, y):
+            return
+        if session.tool == 'brush':
+            builder = Gsk.PathBuilder.new()
+            builder.add_circle(Graphene.Point().init(x, y), max(session.brush / 2, 2))
+            circle = builder.to_path()
+            snapshot.append_stroke(circle, Gsk.Stroke.new(3), BLACK)
+            snapshot.append_stroke(circle, Gsk.Stroke.new(1.5), WHITE)
+        elif session.tool == 'pick':
+            color = session.pixel_at(x, y)
+            if color:
+                self.dot(snapshot, WHITE, x + 12, y + 12, 30)
+                self.dot(snapshot, rgba(color), x + 15, y + 15, 24)
+
+    def draw_frame(self, snapshot, selection, handles):
         s = selection
         # The border sits outside the selection so it never hides selected pixels.
         for x, y, w, h in ((s.x - BORDER, s.y - BORDER, s.w + 2 * BORDER, BORDER),
@@ -258,6 +539,8 @@ class Canvas(Gtk.Widget):
                            (s.x - BORDER, s.y, BORDER, s.h),
                            (s.right, s.y, BORDER, s.h)):
             snapshot.append_color(ACCENT, rect(x, y, w, h))
+        if not handles:
+            return
         middle_x, middle_y = s.x + s.w / 2, s.y + s.h / 2
         for x, y in ((s.x, s.y), (middle_x, s.y), (s.right, s.y), (s.right, middle_y),
                      (s.right, s.bottom), (middle_x, s.bottom), (s.x, s.bottom), (s.x, middle_y)):
@@ -309,6 +592,7 @@ def open_window(session, monitor, output, texture):
     window.set_child(canvas)
     keys = Gtk.EventControllerKey()
     keys.connect('key-pressed', canvas.on_key)
+    keys.connect('key-released', canvas.on_key_released)
     window.add_controller(keys)
     window.connect('close-request', lambda _window: session.finish(None) or True)
     session.canvases.append(canvas)
@@ -324,14 +608,13 @@ def parse_rect(text):
     return Rect(x, y, w, h)
 
 
-def save(pixbuf, path):
+def save(data, path):
     temporary = path.with_name(f'.{path.name}.tmp')
-    pixbuf.savev(str(temporary), 'png', [], [])
+    temporary.write_bytes(data)
     temporary.replace(path)
 
 
-def copy_to_clipboard(pixbuf):
-    _, data = pixbuf.save_to_bufferv('png', [], [])
+def copy_to_clipboard(data):
     # wl-copy keeps serving the clipboard in the background; it must not hold
     # our stdout open, or callers reading it would wait until the next copy.
     subprocess.run(['wl-copy', '--type', 'image/png'], input=data, stdout=subprocess.DEVNULL,
@@ -367,7 +650,7 @@ def main():
 
     if not session.action:
         return CANCELLED
-    image = render(session.selection, session.outputs, session.pixbufs)
+    image = render(session.selection, session.outputs, session.pixbufs, session.annotations)
     if session.action == 'share' and args.output:
         save(image, args.output)
     copy_to_clipboard(image)

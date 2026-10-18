@@ -1,9 +1,10 @@
-"""Selection geometry for shoot-select, kept free of GTK so it can be tested.
+"""Selection geometry and annotations for shoot-select, kept free of GTK so it can be tested.
 
 All rectangles use the compositor's global logical coordinates, the same space
 Niri reports output positions in. Pixels only appear in crop_plan, where each
 output's own scale converts logical edges to that output's captured pixels.
 """
+import math
 from dataclasses import dataclass
 
 HANDLE_GRAB = 12  # Logical pixels around an edge or corner that grab it.
@@ -80,12 +81,28 @@ def hit_test(rect, x, y, grab=HANDLE_GRAB):
     return 'move' if rect.contains(x, y) else None
 
 
-def drag(zone, start, dx, dy, bounds):
-    """Move or resize the selection that existed when the drag began."""
+def drag(zone, start, dx, dy, bounds, centered=False):
+    """Move or resize the selection that existed when the drag began.
+
+    With centered, the opposite edge mirrors the dragged one, so the
+    rectangle grows or shrinks around its center.
+    """
     if zone == 'move':
         return Rect(clamp(round(start.x + dx), bounds.x, bounds.right - start.w),
                     clamp(round(start.y + dy), bounds.y, bounds.bottom - start.h),
                     start.w, start.h)
+    if centered:
+        center_x, center_y = start.x + start.w / 2, start.y + start.h / 2
+        half_w, half_h = start.w / 2, start.h / 2
+        if 'w' in zone:
+            half_w = abs(start.x + dx - center_x)
+        if 'e' in zone:
+            half_w = abs(start.right + dx - center_x)
+        if 'n' in zone:
+            half_h = abs(start.y + dy - center_y)
+        if 's' in zone:
+            half_h = abs(start.bottom + dy - center_y)
+        return centered_span(center_x, center_y, half_w, half_h, bounds)
     x0, y0, x1, y1 = start.x, start.y, start.right, start.bottom
     if 'w' in zone:
         x0 += dx
@@ -106,6 +123,14 @@ def span_within(x0, y0, x1, y1, bounds):
     def y(value):
         return clamp(round(value), bounds.y, bounds.bottom)
     return Rect.span(x(x0), y(y0), x(x1), y(y1))
+
+
+def centered_span(center_x, center_y, half_w, half_h, bounds):
+    """Rectangle around a center, shrunk evenly so both sides stay on the desktop."""
+    half_w = min(half_w, center_x - bounds.x, bounds.right - center_x)
+    half_h = min(half_h, center_y - bounds.y, bounds.bottom - center_y)
+    return span_within(center_x - half_w, center_y - half_h,
+                       center_x + half_w, center_y + half_h, bounds)
 
 
 def nudge(rect, dx, dy, resize, bounds):
@@ -143,3 +168,44 @@ def crop_plan(selection, outputs):
             pieces.append((output.name, (sx0, sy0, sx1 - sx0, sy1 - sy0),
                            (dx0, dy0, dx1 - dx0, dy1 - dy0)))
     return width, height, pieces
+
+
+@dataclass(frozen=True)
+class Box:
+    """A filled rectangle that hides what is under it."""
+    rect: Rect
+    color: tuple  # (red, green, blue), each 0 to 1.
+
+
+@dataclass(frozen=True)
+class Stroke:
+    """A freehand brush stroke through global logical points."""
+    points: tuple
+    width: float
+    color: tuple
+
+
+def cover_pixels(rect, scale_x, scale_y):
+    """Whole result pixels a box covers, rounded outward so no partly covered
+    pixel lets the hidden content show through. rect is relative to the selection."""
+    x0, y0 = math.floor(rect.x * scale_x + 1e-6), math.floor(rect.y * scale_y + 1e-6)
+    x1, y1 = math.ceil(rect.right * scale_x - 1e-6), math.ceil(rect.bottom * scale_y - 1e-6)
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def place_toolbar(selection, outputs, width, height, gap=10):
+    """Put the toolbar under the selection, on the output showing its bottom.
+
+    It moves inside the selection's bottom edge when the output has no room
+    below, and stays within that output horizontally.
+    """
+    anchor_x, anchor_y = selection.x + selection.w / 2, selection.bottom
+    rects = [output.rect for output in outputs]
+    area = next((r for r in rects if r.contains(anchor_x, anchor_y)), None)
+    area = area or next((r for r in rects if r.intersect(selection)), rects[0])
+    y = selection.bottom + gap
+    if y + height > area.bottom:
+        y = max(selection.y, selection.bottom - gap - height)
+    y = clamp(y, area.y, area.bottom - height)
+    x = clamp(selection.x, area.x, area.right - width)
+    return Rect(x, y, width, height)
