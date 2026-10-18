@@ -12,11 +12,15 @@ screen so a cover can match its background. V returns to adjusting the
 selection, 1-4 choose a color, [ ] or the scroll wheel size the brush, and
 Ctrl+Z undoes.
 
+The 2× button (U) renders the selection again from the PDF open in Okular,
+at two or four times the screen resolution.
+
 Enter, Space, or a double-click inside saves the PNG, copies it to the
 clipboard, and prints "share". Ctrl+C only copies it and prints "copy".
 Escape cancels and exits with status 1.
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -48,10 +52,10 @@ gi.require_version('Graphene', '1.0')
 gi.require_version('Gsk', '4.0')
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gtk4LayerShell', '1.0')
-from gi.repository import Gdk, GdkPixbuf, GLib, Graphene, Gsk, Gtk  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk  # noqa: E402
 from gi.repository import Gtk4LayerShell as LayerShell  # noqa: E402
 
-from render import render  # noqa: E402
+from render import crop, render  # noqa: E402
 
 DIM = Gdk.RGBA(red=0, green=0, blue=0, alpha=.45)
 ACCENT = Gdk.RGBA(red=.50, green=.78, blue=1, alpha=1)
@@ -77,6 +81,10 @@ TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_
 COLORS = ((0, 0, 0), (1, 1, 1), (.86, .2, .2))  # The picked color is the fourth swatch.
 COLOR_NAMES = ('Black', 'White', 'Red', 'Picked color')
 BUTTON, GAP, PADDING, SEPARATOR = 32, 2, 5, 10
+UPSCALE_STEPS = {1: 2, 2: 4, 4: 1}
+SEARCH_DELAY = 250  # Milliseconds without selection changes before looking for the PDF.
+SEARCH_WAIT = 35  # Seconds Enter waits for a running PDF search before saving at 1×.
+UPSCALE = Path(__file__).resolve().with_name('upscale.py')
 BRUSH_SIZES = (2, 400)
 
 CURSORS = {
@@ -157,6 +165,11 @@ class Session:
         self.annotations, self.current = [], None
         self.canvases, self.windows = [], []
         self.icons = {}
+        self.upscale = 1
+        # The PDF search for one selection: selection, process, done, result.
+        self.search = None
+        self.search_timer, self.search_pending = None, None
+        self.waiting = False  # Enter was pressed; the loop ends when the search does.
         self.action = None
         self.loop = GLib.MainLoop()
 
@@ -199,7 +212,7 @@ class Session:
         if not self.selection:
             return []
         layout = [('tool', name) for name, _, _ in TOOLS] + [None]
-        layout += [('color', index) for index in range(len(COLORS) + 1)] + [None, ('undo',)]
+        layout += [('color', index) for index in range(len(COLORS) + 1)] + [None, ('undo',), None, ('upscale',)]
         width = 2 * PADDING + sum(SEPARATOR if item is None else BUTTON + GAP for item in layout) - GAP
         box = place_toolbar(self.selection, self.outputs, width, BUTTON + 2 * PADDING)
         items, x = [(('toolbar',), box)], box.x + PADDING
@@ -229,6 +242,9 @@ class Session:
             self.redraw()
         elif item[0] == 'undo':
             self.undo()
+        elif item[0] == 'upscale':
+            self.upscale = UPSCALE_STEPS[self.upscale]
+            self.redraw()
 
     def begin_drag(self, x, y):
         item = self.toolbar_item_at(x, y)
@@ -282,8 +298,59 @@ class Session:
         return self.dragging and self.dragging['zone'] not in ('ignore', 'box', 'brush')
 
     def redraw(self):
+        self.schedule_search()
         for canvas in self.canvases:
             canvas.queue_draw()
+
+    def schedule_search(self):
+        """Look for the PDF once the selection has stopped changing for a moment."""
+        if self.upscale == 1 or not self.selection or self.dragging:
+            return
+        if self.selection in (self.search_pending, self.search and self.search['selection']):
+            return
+        self.search_pending = self.selection
+        if self.search_timer:
+            GLib.source_remove(self.search_timer)
+        self.search_timer = GLib.timeout_add(SEARCH_DELAY, self.start_search)
+
+    def start_search(self):
+        self.search_timer, self.search_pending = None, None
+        if self.selection:
+            self.launch_search(self.selection)
+        return GLib.SOURCE_REMOVE
+
+    def launch_search(self, selection):
+        """Look for the PDF behind a selection in a separate, lower-priority process."""
+        self.stop_search()
+        _, png = crop(selection, self.outputs, self.pixbufs).save_to_bufferv('png', [], [])
+        launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE)
+        launcher.set_environ([f'{key}={value}' for key, value in CHILD_ENVIRONMENT.items()])
+        process = launcher.spawnv([sys.executable, str(UPSCALE)])
+        search = self.search = {'selection': selection, 'process': process, 'done': False, 'result': None}
+        process.communicate_async(GLib.Bytes.new(png), None, self.on_search_done, search)
+
+    def on_search_done(self, process, result, search):
+        try:
+            _, stdout, _ = process.communicate_finish(result)
+            search['result'] = json.loads((stdout and stdout.get_data()) or b'null')
+        except (GLib.Error, ValueError):
+            search['result'] = None
+        search['done'] = True
+        if search is self.search:
+            if self.waiting:
+                self.loop.quit()
+            self.redraw()
+
+    def stop_search(self):
+        if self.search and not self.search['done']:
+            self.search['process'].force_exit()
+
+    def source(self):
+        """The PDF area under the current selection as a dict, None, or 'searching'."""
+        search = self.search
+        if not search or search['selection'] != self.selection or not search['done']:
+            return 'searching'
+        return search['result']
 
     def set_selection(self, selection):
         self.selection = selection
@@ -291,7 +358,15 @@ class Session:
 
     def size_label(self):
         width, height, _ = crop_plan(self.selection, self.outputs)
-        return f'{width} × {height}'
+        if self.upscale == 1:
+            return f'{width} × {height}'
+        source = self.source()
+        if source == 'searching':
+            return f'{width} × {height}  ·  finding the PDF…'
+        if source is None:
+            return f'{width} × {height}  ·  no PDF match in Okular, saving at 1×'
+        label = f'{Path(source["path"]).name} p. {source["page"] + 1}'
+        return f'{width * self.upscale} × {height * self.upscale}  ·  {self.upscale}× from {label}'
 
     def icon(self, name):
         if name not in self.icons:
@@ -306,6 +381,16 @@ class Session:
         self.action = action
         for window in self.windows:
             window.set_visible(False)
+        if self.search_timer:
+            GLib.source_remove(self.search_timer)
+            self.search_timer = None
+        if action and self.upscale > 1 and self.source() == 'searching':
+            if not self.search or self.search['selection'] != self.selection:
+                self.launch_search(self.selection)
+            # on_search_done ends the loop; the timeout keeps a stuck search from holding the capture.
+            self.waiting = True
+            GLib.timeout_add_seconds(SEARCH_WAIT, self.loop.quit)
+            return
         self.loop.quit()
 
 
@@ -408,6 +493,8 @@ class Canvas(Gtk.Widget):
             session.set_selection(nudge(session.selection, dx * step, dy * step, shift, session.bounds))
         elif control:
             return False
+        elif keyval in (Gdk.KEY_u, Gdk.KEY_U):
+            session.activate(('upscale',))
         elif Gdk.keyval_to_lower(keyval) in TOOL_KEYS:
             session.set_tool(TOOL_KEYS[Gdk.keyval_to_lower(keyval)])
         elif Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(COLORS) + 1:
@@ -483,11 +570,22 @@ class Canvas(Gtk.Widget):
             bounds = rect(area.x, area.y, area.w, area.h)
             active = (item == ('tool', session.tool)
                       or (item[0] == 'color' and item[1] == session.color_index and session.tool != 'select'))
+            if item[0] == 'upscale':
+                active = session.upscale > 1
             if item[0] != 'color' and (active or item == hovered):
                 push_rounded(snapshot, bounds, 7)
                 snapshot.append_color(ACTIVE_BUTTON if active else HOVER_BUTTON, bounds)
                 snapshot.pop()
-            if item[0] == 'color':
+            if item[0] == 'upscale':
+                layout = self.create_pango_layout(f'{session.upscale}×')
+                text_w, text_h = layout.get_pixel_size()
+                snapshot.save()
+                snapshot.translate(Graphene.Point().init(area.x + (area.w - text_w) / 2,
+                                                         area.y + (area.h - text_h) / 2))
+                color = LABEL_TEXT if active else Gdk.RGBA(red=1, green=1, blue=1, alpha=.45)
+                snapshot.append_layout(layout, color)
+                snapshot.restore()
+            elif item[0] == 'color':
                 center_x, center_y = area.x + area.w / 2, area.y + area.h / 2
                 ring = 24 if active else 20 if item == hovered else 18
                 self.dot(snapshot, ACCENT if active else SWATCH_RING, center_x - ring / 2, center_y - ring / 2, ring)
@@ -509,7 +607,8 @@ class Canvas(Gtk.Widget):
             item, area = tooltip
             text = {'tool': lambda: next(tip for tool, _, tip in TOOLS if tool == item[1]),
                     'color': lambda: f'{COLOR_NAMES[item[1]]}  {item[1] + 1}',
-                    'undo': lambda: 'Undo  Ctrl+Z'}[item[0]]()
+                    'undo': lambda: 'Undo  Ctrl+Z',
+                    'upscale': lambda: 'Sharper from the PDF open in Okular: 1×, 2×, 4×  U'}[item[0]]()
             self.draw_label(snapshot, text, area.x, box.bottom + 6, above=False)
 
     def draw_tool_preview(self, snapshot):
@@ -648,9 +747,16 @@ def main():
         open_window(session, monitor, output, texture_for(pixbuf))
     session.loop.run()
 
+    source = session.source() if session.upscale > 1 else None
+    session.stop_search()
     if not session.action:
         return CANCELLED
-    image = render(session.selection, session.outputs, session.pixbufs, session.annotations)
+    base = None
+    if isinstance(source, dict):
+        import upscale
+        width, height, _ = crop_plan(session.selection, session.outputs)
+        base = upscale.render_source(upscale.Source(**source), width, height, session.upscale)
+    image = render(session.selection, session.outputs, session.pixbufs, session.annotations, base)
     if session.action == 'share' and args.output:
         save(image, args.output)
     copy_to_clipboard(image)

@@ -27,15 +27,22 @@ def crop(selection, outputs, pixbufs):
     return result
 
 
-def render(selection, outputs, pixbufs, annotations=()):
-    image = crop(selection, outputs, pixbufs)
-    if not annotations:
-        _, data = image.save_to_bufferv('png', [], [])
-        return data
-    width, height = image.get_width(), image.get_height()
+def render(selection, outputs, pixbufs, annotations=(), base=None):
+    """PNG bytes of the selection with annotations painted on.
+
+    base is an optional cairo surface that replaces the captured pixels, such
+    as the selection rendered again from its PDF; annotations scale to its size.
+    """
+    if base is None:
+        image = crop(selection, outputs, pixbufs)
+        if not annotations:
+            _, data = image.save_to_bufferv('png', [], [])
+            return data
+        _, data = image.save_to_bufferv('png', ['compression'], ['0'])
+        base = cairo.ImageSurface.create_from_png(io.BytesIO(data))
+    surface = base
+    width, height = surface.get_width(), surface.get_height()
     scale_x, scale_y = width / selection.w, height / selection.h
-    _, data = image.save_to_bufferv('png', ['compression'], ['0'])
-    surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
     context = cairo.Context(surface)
     for annotation in annotations:
         context.set_source_rgb(*annotation.color)

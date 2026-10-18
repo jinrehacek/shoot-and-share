@@ -8,3 +8,12 @@
 - Start with the previous selection, like Niri's screenshot UI.
 - Click a window to snap the selection to it.
 - Use shoot-select for local-only screenshots (Print, Mod+Shift+S) too.
+- **PDF upscale speed.** Matching takes about one second per page, up to three
+  pages per visible Okular window; most of it is FFTs, sliding-window sums, and
+  resizing across about 50 zoom levels. Ideas: derive the zoom from the page
+  edges visible on screen, remember each Okular window's zoom from the previous
+  match, or check first the Okular window under the selection (Niri reports
+  window positions) instead of the focused one.
+- PDF upscale for other viewers: PDF.js in Zen (no D-Bus; would need the file
+  from the browser), Papers/Evince (D-Bus exposes the document URI).
+- PDF upscale for a selection spanning two pages in continuous mode.
