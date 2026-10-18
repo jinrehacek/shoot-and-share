@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+"""Freeze every screen, select a region with resizable handles, and save it as PNG.
+
+Drag anywhere to select, on any monitor. Drag the edges or corners to resize,
+drag the inside to move, or drag outside to start again. Arrow keys move the
+selection by one pixel; Shift+arrows resize it; Ctrl makes steps of ten.
+
+Enter, Space, or a double-click inside saves the PNG, copies it to the
+clipboard, and prints "share". Ctrl+C only copies it and prints "copy".
+Escape cancels and exits with status 1.
+"""
+import argparse
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from selection import MIN_NEW_SIZE, Output, Rect, crop_plan, drag, hit_test, nudge, span_within
+
+LAYER_SHELL = 'libgtk4-layer-shell.so.0'
+CANCELLED = 1
+
+# gtk4-layer-shell must load before libwayland-client, which Python can only
+# guarantee through LD_PRELOAD. Children get the environment without it.
+CHILD_ENVIRONMENT = os.environ.copy()
+if LAYER_SHELL not in os.environ.get('LD_PRELOAD', ''):
+    os.environ['LD_PRELOAD'] = ' '.join(filter(None, [LAYER_SHELL, os.environ.get('LD_PRELOAD')]))
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+CHILD_ENVIRONMENT['LD_PRELOAD'] = ' '.join(
+    item for item in os.environ['LD_PRELOAD'].split() if item != LAYER_SHELL)
+if not CHILD_ENVIRONMENT['LD_PRELOAD']:
+    del CHILD_ENVIRONMENT['LD_PRELOAD']
+
+import gi  # noqa: E402
+
+gi.require_version('Gdk', '4.0')
+gi.require_version('GdkPixbuf', '2.0')
+gi.require_version('Graphene', '1.0')
+gi.require_version('Gsk', '4.0')
+gi.require_version('Gtk', '4.0')
+gi.require_version('Gtk4LayerShell', '1.0')
+from gi.repository import Gdk, GdkPixbuf, GLib, Graphene, Gsk, Gtk  # noqa: E402
+from gi.repository import Gtk4LayerShell as LayerShell  # noqa: E402
+
+DIM = Gdk.RGBA(red=0, green=0, blue=0, alpha=.45)
+ACCENT = Gdk.RGBA(red=.50, green=.78, blue=1, alpha=1)
+HANDLE = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
+LABEL_BACKGROUND = Gdk.RGBA(red=.08, green=.08, blue=.1, alpha=.85)
+LABEL_TEXT = Gdk.RGBA(red=1, green=1, blue=1, alpha=1)
+BORDER = 2
+HANDLE_SIZE = 9
+HINT = 'Drag to select  ·  Enter share  ·  Ctrl+C copy  ·  Esc cancel'
+
+CURSORS = {
+    None: 'crosshair', 'move': 'move',
+    'n': 'ns-resize', 's': 'ns-resize', 'e': 'ew-resize', 'w': 'ew-resize',
+    'nw': 'nwse-resize', 'se': 'nwse-resize', 'ne': 'nesw-resize', 'sw': 'nesw-resize',
+}
+
+
+def rect(x, y, w, h):
+    return Graphene.Rect().init(x, y, w, h)
+
+
+def push_rounded(snapshot, bounds, radius):
+    # Keep the struct in a variable: chaining init_from_rect onto a temporary
+    # returns a view of memory PyGObject frees before GTK reads it.
+    clip = Gsk.RoundedRect()
+    clip.init_from_rect(bounds, radius)
+    snapshot.push_rounded_clip(clip)
+
+
+def capture(monitors):
+    """Grab every output at once, before any overlay is visible."""
+    def grab(monitor):
+        result = subprocess.run(['grim', '-l', '0', '-o', monitor.get_connector(), '-'],
+                                capture_output=True, env=CHILD_ENVIRONMENT, timeout=10, check=False)
+        if result.returncode:
+            raise RuntimeError(f'grim failed on {monitor.get_connector()}: '
+                               f'{result.stderr.decode(errors="replace").strip()}')
+        loader = GdkPixbuf.PixbufLoader.new_with_type('png')
+        loader.write(result.stdout)
+        loader.close()
+        return loader.get_pixbuf()
+    with ThreadPoolExecutor(len(monitors)) as pool:
+        return list(pool.map(grab, monitors))
+
+
+def texture_for(pixbuf):
+    memory_format = Gdk.MemoryFormat.R8G8B8A8 if pixbuf.get_has_alpha() else Gdk.MemoryFormat.R8G8B8
+    return Gdk.MemoryTexture.new(pixbuf.get_width(), pixbuf.get_height(), memory_format,
+                                 pixbuf.read_pixel_bytes(), pixbuf.get_rowstride())
+
+
+def render(selection, outputs, pixbufs):
+    width, height, pieces = crop_plan(selection, outputs)
+    if len(pieces) == 1 and (pieces[0][1][2:] == pieces[0][2][2:]):
+        name, (sx, sy, w, h), _ = pieces[0]
+        return pixbufs[name].new_subpixbuf(sx, sy, w, h).copy()
+    # Areas outside every monitor stay transparent.
+    result = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, width, height)
+    result.fill(0)
+    for name, (sx, sy, sw, sh), (dx, dy, dw, dh) in pieces:
+        scale_x, scale_y = dw / sw, dh / sh
+        same = scale_x == 1 and scale_y == 1
+        pixbufs[name].scale(result, dx, dy, dw, dh, dx - sx * scale_x, dy - sy * scale_y,
+                            scale_x, scale_y,
+                            GdkPixbuf.InterpType.NEAREST if same else GdkPixbuf.InterpType.BILINEAR)
+    return result
+
+
+class Session:
+    def __init__(self, outputs, pixbufs, initial):
+        self.outputs, self.pixbufs = outputs, pixbufs
+        self.bounds = outputs[0].rect
+        for output in outputs[1:]:
+            self.bounds = self.bounds.union(output.rect)
+        self.selection = initial
+        self.dragging = None  # (zone, selection when the drag began, start x, start y)
+        self.pointer_output = outputs[0]
+        self.canvases, self.windows = [], []
+        self.action = None
+        self.loop = GLib.MainLoop()
+
+    def redraw(self):
+        for canvas in self.canvases:
+            canvas.queue_draw()
+
+    def set_selection(self, selection):
+        self.selection = selection
+        self.redraw()
+
+    def size_label(self):
+        width, height, _ = crop_plan(self.selection, self.outputs)
+        return f'{width} × {height}'
+
+    def finish(self, action):
+        # Ignore confirmation without a selection or with one in a gap between monitors.
+        if action and not (self.selection and crop_plan(self.selection, self.outputs)[2]):
+            return
+        self.action = action
+        for window in self.windows:
+            window.set_visible(False)
+        self.loop.quit()
+
+
+class Canvas(Gtk.Widget):
+    def __init__(self, session, output, texture):
+        super().__init__()
+        self.session, self.output, self.texture = session, output, texture
+        self.set_cursor_from_name('crosshair')
+
+        gesture = Gtk.GestureDrag(button=Gdk.BUTTON_PRIMARY)
+        gesture.connect('drag-begin', self.on_drag_begin)
+        gesture.connect('drag-update', self.on_drag_update)
+        gesture.connect('drag-end', self.on_drag_end)
+        self.add_controller(gesture)
+
+        click = Gtk.GestureClick(button=0)
+        click.connect('pressed', self.on_click)
+        self.add_controller(click)
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect('enter', self.on_motion)
+        motion.connect('motion', self.on_motion)
+        self.add_controller(motion)
+
+    def global_point(self, x, y):
+        return self.output.rect.x + x, self.output.rect.y + y
+
+    def on_motion(self, _controller, x, y):
+        self.session.pointer_output = self.output
+        if not self.session.dragging:
+            self.set_cursor_from_name(CURSORS[hit_test(self.session.selection, *self.global_point(x, y))])
+
+    def on_drag_begin(self, _gesture, x, y):
+        gx, gy = self.global_point(x, y)
+        session = self.session
+        session.dragging = (hit_test(session.selection, gx, gy) or 'new', session.selection, gx, gy)
+
+    def on_drag_update(self, _gesture, dx, dy):
+        session = self.session
+        zone, start, gx, gy = session.dragging
+        if zone == 'new':
+            session.set_selection(span_within(gx, gy, gx + dx, gy + dy, session.bounds))
+        else:
+            session.set_selection(drag(zone, start, dx, dy, session.bounds))
+
+    def on_drag_end(self, _gesture, _dx, _dy):
+        session = self.session
+        zone, start, _, _ = session.dragging
+        session.dragging = None
+        selection = session.selection
+        if zone == 'new' and (selection is None or min(selection.w, selection.h) < MIN_NEW_SIZE):
+            session.set_selection(start)
+
+    def on_click(self, gesture, presses, x, y):
+        session = self.session
+        button = gesture.get_current_button()
+        if button == Gdk.BUTTON_SECONDARY:
+            session.set_selection(None)
+        elif (button == Gdk.BUTTON_PRIMARY and presses == 2 and session.selection
+              and session.selection.contains(*self.global_point(x, y))):
+            session.finish('share')
+
+    def on_key(self, _controller, keyval, _keycode, state):
+        session = self.session
+        control = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        if keyval == Gdk.KEY_Escape:
+            session.finish(None)
+        elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+            session.finish('share')
+        elif control and keyval in (Gdk.KEY_c, Gdk.KEY_C):
+            session.finish('copy')
+        elif control and keyval in (Gdk.KEY_a, Gdk.KEY_A):
+            session.set_selection(session.pointer_output.rect)
+        elif keyval in ARROWS and session.selection:
+            dx, dy = ARROWS[keyval]
+            step = 10 if control else 1
+            session.set_selection(nudge(session.selection, dx * step, dy * step, shift, session.bounds))
+        else:
+            return False
+        return True
+
+    def do_snapshot(self, snapshot):
+        session, area = self.session, self.output.rect
+        # Draw in global coordinates; the widget clips to its own output.
+        snapshot.translate(Graphene.Point().init(-area.x, -area.y))
+        snapshot.append_scaled_texture(self.texture, Gsk.ScalingFilter.NEAREST,
+                                       rect(area.x, area.y, area.w, area.h))
+        selection = session.selection
+        visible = selection and selection.intersect(area)
+        if not visible:
+            snapshot.append_color(DIM, rect(area.x, area.y, area.w, area.h))
+        else:
+            for part in (Rect.span(area.x, area.y, area.right, visible.y),
+                         Rect.span(area.x, visible.bottom, area.right, area.bottom),
+                         Rect.span(area.x, visible.y, visible.x, visible.bottom),
+                         Rect.span(visible.right, visible.y, area.right, visible.bottom)):
+                if part.w > 0 and part.h > 0:
+                    snapshot.append_color(DIM, rect(part.x, part.y, part.w, part.h))
+        if selection:
+            self.draw_frame(snapshot, selection)
+            self.draw_label(snapshot, session.size_label(), selection.x, selection.y - 8, above=True)
+        elif not session.dragging:
+            layout = self.create_pango_layout(HINT)
+            width, height = layout.get_pixel_size()
+            self.draw_label(snapshot, HINT, area.x + (area.w - width) / 2,
+                            area.y + (area.h - height) / 2, above=False)
+
+    def draw_frame(self, snapshot, selection):
+        s = selection
+        # The border sits outside the selection so it never hides selected pixels.
+        for x, y, w, h in ((s.x - BORDER, s.y - BORDER, s.w + 2 * BORDER, BORDER),
+                           (s.x - BORDER, s.bottom, s.w + 2 * BORDER, BORDER),
+                           (s.x - BORDER, s.y, BORDER, s.h),
+                           (s.right, s.y, BORDER, s.h)):
+            snapshot.append_color(ACCENT, rect(x, y, w, h))
+        middle_x, middle_y = s.x + s.w / 2, s.y + s.h / 2
+        for x, y in ((s.x, s.y), (middle_x, s.y), (s.right, s.y), (s.right, middle_y),
+                     (s.right, s.bottom), (middle_x, s.bottom), (s.x, s.bottom), (s.x, middle_y)):
+            outer = HANDLE_SIZE + 2
+            self.dot(snapshot, ACCENT, x - outer / 2, y - outer / 2, outer)
+            self.dot(snapshot, HANDLE, x - HANDLE_SIZE / 2, y - HANDLE_SIZE / 2, HANDLE_SIZE)
+
+    @staticmethod
+    def dot(snapshot, color, x, y, size):
+        bounds = rect(x, y, size, size)
+        push_rounded(snapshot, bounds, size / 2)
+        snapshot.append_color(color, bounds)
+        snapshot.pop()
+
+    def draw_label(self, snapshot, text, x, y, above):
+        layout = self.create_pango_layout(text)
+        width, height = layout.get_pixel_size()
+        padding_x, padding_y = 8, 4
+        box_w, box_h = width + 2 * padding_x, height + 2 * padding_y
+        if above:
+            y -= box_h
+            if y < self.session.bounds.y:  # No room above: tuck it inside the selection.
+                y = self.session.selection.y + 8
+                x += 8
+        bounds = rect(x, y, box_w, box_h)
+        push_rounded(snapshot, bounds, 6)
+        snapshot.append_color(LABEL_BACKGROUND, bounds)
+        snapshot.pop()
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(x + padding_x, y + padding_y))
+        snapshot.append_layout(layout, LABEL_TEXT)
+        snapshot.restore()
+
+
+ARROWS = {Gdk.KEY_Left: (-1, 0), Gdk.KEY_Right: (1, 0), Gdk.KEY_Up: (0, -1), Gdk.KEY_Down: (0, 1)}
+
+
+def open_window(session, monitor, output, texture):
+    window = Gtk.Window(decorated=False)
+    LayerShell.init_for_window(window)
+    LayerShell.set_namespace(window, 'shoot-select')
+    LayerShell.set_layer(window, LayerShell.Layer.OVERLAY)
+    LayerShell.set_monitor(window, monitor)
+    for edge in (LayerShell.Edge.TOP, LayerShell.Edge.BOTTOM, LayerShell.Edge.LEFT, LayerShell.Edge.RIGHT):
+        LayerShell.set_anchor(window, edge, True)
+    LayerShell.set_exclusive_zone(window, -1)  # Cover panels too.
+    LayerShell.set_keyboard_mode(window, LayerShell.KeyboardMode.EXCLUSIVE)
+    canvas = Canvas(session, output, texture)
+    window.set_child(canvas)
+    keys = Gtk.EventControllerKey()
+    keys.connect('key-pressed', canvas.on_key)
+    window.add_controller(keys)
+    window.connect('close-request', lambda _window: session.finish(None) or True)
+    session.canvases.append(canvas)
+    session.windows.append(window)
+    window.present()
+
+
+def parse_rect(text):
+    try:
+        x, y, w, h = (float(part) for part in text.split(','))
+    except ValueError:
+        raise argparse.ArgumentTypeError('expected X,Y,WIDTH,HEIGHT') from None
+    return Rect(x, y, w, h)
+
+
+def save(pixbuf, path):
+    temporary = path.with_name(f'.{path.name}.tmp')
+    pixbuf.savev(str(temporary), 'png', [], [])
+    temporary.replace(path)
+
+
+def copy_to_clipboard(pixbuf):
+    _, data = pixbuf.save_to_bufferv('png', [], [])
+    # wl-copy keeps serving the clipboard in the background; it must not hold
+    # our stdout open, or callers reading it would wait until the next copy.
+    subprocess.run(['wl-copy', '--type', 'image/png'], input=data, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, env=CHILD_ENVIRONMENT, timeout=5, check=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--output', type=Path, help='where Enter saves the PNG (default: clipboard only)')
+    parser.add_argument('--initial', type=parse_rect, metavar='X,Y,W,H',
+                        help='start with this selection, in logical global coordinates')
+    args = parser.parse_args()
+
+    if not Gtk.init_check():
+        raise RuntimeError('Cannot open the Wayland display')
+    if not LayerShell.is_supported():
+        raise RuntimeError('The compositor does not support wlr-layer-shell')
+    monitor_list = Gdk.Display.get_default().get_monitors()
+    monitors = [monitor_list.get_item(index) for index in range(monitor_list.get_n_items())]
+    pixbufs = capture(monitors)
+
+    outputs = []
+    for monitor, pixbuf in zip(monitors, pixbufs):
+        geometry = monitor.get_geometry()
+        outputs.append(Output(monitor.get_connector(),
+                              Rect(geometry.x, geometry.y, geometry.width, geometry.height),
+                              pixbuf.get_width(), pixbuf.get_height()))
+    session = Session(outputs, {output.name: pixbuf for output, pixbuf in zip(outputs, pixbufs)},
+                      args.initial)
+    for monitor, output, pixbuf in zip(monitors, outputs, pixbufs):
+        open_window(session, monitor, output, texture_for(pixbuf))
+    session.loop.run()
+
+    if not session.action:
+        return CANCELLED
+    image = render(session.selection, session.outputs, session.pixbufs)
+    if session.action == 'share' and args.output:
+        save(image, args.output)
+    copy_to_clipboard(image)
+    print(session.action, flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(f'shoot-select: {error}', file=sys.stderr)
+        sys.exit(2)
