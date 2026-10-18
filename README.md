@@ -22,6 +22,10 @@ a selection can cross monitors.
 | Ctrl+C | Copy to clipboard only, print `copy` |
 | Escape | Cancel, exit status 1 |
 
+The next run starts with the last saved or copied selection, like Niri's
+screenshot UI. It is stored in `~/.local/state/shoot-select/last-selection.json`
+and trimmed to the monitors that are connected now.
+
 ## Hiding things
 
 A toolbar appears under the selection. Paint lands in the saved PNG.
@@ -65,7 +69,7 @@ itself contains. Paint is applied on top of the sharper image.
 
 ```bash
 shoot-select --output region.png             # Enter saves here and copies
-shoot-select --initial 100,100,640,480 ...    # start with a selection (logical coordinates)
+shoot-select --initial 100,100,640,480 ...    # start with this selection instead of the last one
 ```
 
 Exit status: 0 after Enter or Ctrl+C, 1 after Escape, 2 on errors.

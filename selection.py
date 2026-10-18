@@ -142,6 +142,23 @@ def nudge(rect, dx, dy, resize, bounds):
     return drag('move', rect, dx, dy, bounds)
 
 
+def restore(rect, outputs):
+    """A remembered selection fitted to the current outputs, or None if it no longer fits.
+
+    Monitors may have been unplugged or rearranged since it was saved; a
+    selection that no longer touches any output is dropped.
+    """
+    if rect is None or rect.w < 1 or rect.h < 1:
+        return None
+    bounds = outputs[0].rect
+    for output in outputs[1:]:
+        bounds = bounds.union(output.rect)
+    fitted = bounds.intersect(rect)
+    if not fitted or not any(fitted.intersect(output.rect) for output in outputs):
+        return None
+    return fitted
+
+
 def crop_plan(selection, outputs):
     """Plan the PNG for a selection that may cover several outputs.
 

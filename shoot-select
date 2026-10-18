@@ -18,6 +18,9 @@ at two or four times the screen resolution.
 Enter, Space, or a double-click inside saves the PNG, copies it to the
 clipboard, and prints "share". Ctrl+C only copies it and prints "copy".
 Escape cancels and exits with status 1.
+
+The next run starts with the last saved or copied selection, like Niri's
+screenshot UI. Drag outside it to start over, or right-click to clear it.
 """
 import argparse
 import json
@@ -27,7 +30,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from selection import (MIN_NEW_SIZE, Box, Output, Rect, Stroke, centered_span, clamp, crop_plan, drag,
+from selection import (MIN_NEW_SIZE, Box, Output, Rect, Stroke, centered_span, clamp, crop_plan, drag, restore,
                        hit_test, nudge, place_toolbar, span_within)
 
 LAYER_SHELL = 'libgtk4-layer-shell.so.0'
@@ -707,6 +710,29 @@ def parse_rect(text):
     return Rect(x, y, w, h)
 
 
+LAST_SELECTION = (Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state'))
+                  / 'shoot-select' / 'last-selection.json')
+
+
+def load_last_selection():
+    try:
+        x, y, w, h = json.loads(LAST_SELECTION.read_text())
+        return Rect(float(x), float(y), float(w), float(h))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def remember_selection(selection):
+    """Keep the selection for the next run; losing it is never worth failing a capture."""
+    try:
+        LAST_SELECTION.parent.mkdir(parents=True, exist_ok=True)
+        temporary = LAST_SELECTION.with_suffix('.tmp')
+        temporary.write_text(json.dumps([selection.x, selection.y, selection.w, selection.h]))
+        temporary.replace(LAST_SELECTION)
+    except OSError as error:
+        print(f'shoot-select: cannot remember the selection: {error}', file=sys.stderr)
+
+
 def save(data, path):
     temporary = path.with_name(f'.{path.name}.tmp')
     temporary.write_bytes(data)
@@ -724,7 +750,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--output', type=Path, help='where Enter saves the PNG (default: clipboard only)')
     parser.add_argument('--initial', type=parse_rect, metavar='X,Y,W,H',
-                        help='start with this selection, in logical global coordinates')
+                        help='start with this selection, in logical global coordinates '
+                             '(default: the last saved or copied one)')
     args = parser.parse_args()
 
     if not Gtk.init_check():
@@ -742,7 +769,7 @@ def main():
                               Rect(geometry.x, geometry.y, geometry.width, geometry.height),
                               pixbuf.get_width(), pixbuf.get_height()))
     session = Session(outputs, {output.name: pixbuf for output, pixbuf in zip(outputs, pixbufs)},
-                      args.initial)
+                      restore(args.initial or load_last_selection(), outputs))
     for monitor, output, pixbuf in zip(monitors, outputs, pixbufs):
         open_window(session, monitor, output, texture_for(pixbuf))
     session.loop.run()
@@ -760,6 +787,7 @@ def main():
     if session.action == 'share' and args.output:
         save(image, args.output)
     copy_to_clipboard(image)
+    remember_selection(session.selection)
     print(session.action, flush=True)
     return 0
 

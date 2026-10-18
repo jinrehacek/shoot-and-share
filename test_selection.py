@@ -1,7 +1,7 @@
 import unittest
 
 from selection import (Output, Rect, centered_span, cover_pixels, crop_plan, drag, hit_test, nudge,
-                       place_toolbar, span_within)
+                       place_toolbar, restore, span_within)
 
 # The laptop layout: a 1x laptop panel and a 1.25x monitor to its right.
 LAPTOP = Output('eDP-1', Rect(0, 0, 1920, 1200), 1920, 1200)
@@ -76,6 +76,21 @@ class Toolbar(unittest.TestCase):
     def test_stays_on_the_output_horizontally(self):
         self.assertEqual(place_toolbar(Rect(3300, 100, 100, 100), [LAPTOP, MONITOR], 400, 42),
                          Rect(3056, 210, 400, 42))
+
+
+class Restore(unittest.TestCase):
+    def test_keeps_a_selection_that_still_fits(self):
+        self.assertEqual(restore(Rect(100, 100, 300, 200), [LAPTOP, MONITOR]), Rect(100, 100, 300, 200))
+
+    def test_trims_a_selection_on_an_unplugged_monitor(self):
+        self.assertEqual(restore(Rect(1800, 100, 400, 200), [LAPTOP]), Rect(1800, 100, 120, 200))
+        self.assertIsNone(restore(Rect(2000, 100, 400, 200), [LAPTOP]))
+
+    def test_drops_a_selection_in_the_gap_between_monitors(self):
+        self.assertIsNone(restore(Rect(2000, 1000, 100, 100), [LAPTOP, MONITOR]))
+
+    def test_nothing_remembered(self):
+        self.assertIsNone(restore(None, [LAPTOP]))
 
 
 class CropPlan(unittest.TestCase):
