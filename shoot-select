@@ -734,6 +734,7 @@ def remember_selection(selection):
 
 
 def save(data, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.tmp')
     temporary.write_bytes(data)
     temporary.replace(path)

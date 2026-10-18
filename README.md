@@ -5,7 +5,15 @@ every monitor at once, lets you drag a rectangle anywhere, and lets you adjust
 it with edge and corner handles before saving. There is no monitor picker, and
 a selection can cross monitors.
 
-`tablet-share` from the dotfiles runs it for **Ctrl+Shift+S**.
+Niri runs it from the dotfiles bindings:
+
+| Keys | Result |
+|------|--------|
+| Ctrl+Shift+S | `tablet-share`: Enter saves, copies, and uploads to the tablet gallery |
+| Print, Mod+Shift+S | Enter saves to `~/Pictures/Screenshots/` and copies |
+
+Whole-screen (Ctrl+Print) and window (Alt+Print) screenshots stay Niri's own.
+Both region bindings share the remembered selection.
 
 ## Controls
 

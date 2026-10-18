@@ -6,7 +6,6 @@
   warm background process that only shows windows, or rewrite in a compiled
   language.
 - Click a window to snap the selection to it.
-- Use shoot-select for local-only screenshots (Print, Mod+Shift+S) too.
 - **PDF upscale speed.** Matching takes about one second per page, up to three
   pages per visible Okular window; most of it is FFTs, sliding-window sums, and
   resizing across about 50 zoom levels. Ideas: derive the zoom from the page
