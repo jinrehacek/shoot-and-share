@@ -34,16 +34,17 @@ The next run starts with the last saved or copied selection, like Niri's
 screenshot UI. It is stored in `~/.local/state/shoot-select/last-selection.json`
 and trimmed to the monitors that are connected now.
 
-## Hiding things
+## Annotations
 
-A toolbar appears under the selection. Paint lands in the saved PNG.
+A toolbar appears under the selection. Annotations land in the saved PNG.
 
 | Tool | Key | Use |
 |------|-----|-----|
 | Adjust | V | Move and resize the selection (default) |
 | Box | R | Drag a solid rectangle; its edges round outward to whole pixels |
 | Brush | B | Paint freehand; `[` `]` or the scroll wheel change the size |
-| Pick | I | Click to take a color from the screen, then return to Box or Brush |
+| Arrow | A | Drag from tail to tip; Shift snaps to 45°; `[` `]` or the scroll wheel change thickness |
+| Pick | I | Click to take a color from the screen, then return to the drawing tool |
 
 Keys 1–4 choose black, white, red, or the picked color. Ctrl+Z undoes.
 To hide text on a colored background, pick that background and box over the text.

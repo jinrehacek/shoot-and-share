@@ -1,7 +1,7 @@
 import unittest
 
-from selection import (Output, Rect, centered_span, cover_pixels, crop_plan, drag, hit_test, nudge,
-                       place_toolbar, restore, span_within)
+from selection import (Arrow, Output, Rect, centered_span, cover_pixels, crop_plan, drag, hit_test, nudge,
+                       place_toolbar, restore, snap_angle, span_within)
 
 # The laptop layout: a 1x laptop panel and a 1.25x monitor to its right.
 LAPTOP = Output('eDP-1', Rect(0, 0, 1920, 1200), 1920, 1200)
@@ -62,6 +62,52 @@ class CoverPixels(unittest.TestCase):
 
     def test_exact_at_whole_scale(self):
         self.assertEqual(cover_pixels(Rect(4, 6, 10, 20), 1, 1), (4, 6, 10, 20))
+
+
+class ArrowGeometry(unittest.TestCase):
+    def test_head_points_forward_in_all_directions(self):
+        for dx, dy in ((60, 0), (-60, 0), (0, 60), (0, -60),
+                       (60, 60), (-60, 60), (60, -60), (-60, -60)):
+            with self.subTest(direction=(dx, dy)):
+                start, end = (100, 200), (100 + dx, 200 + dy)
+                (tail, base), head = Arrow(start, end, 4, (0, 0, 0)).shape
+                self.assertEqual(tail, start)
+                self.assertEqual(head[1], end)
+                # The shaft stops where the head begins, partway towards the tip.
+                self.assertGreater((end[0] - base[0]) * dx + (end[1] - base[1]) * dy, 0)
+                for x, y in (head[0], head[2]):
+                    self.assertGreater((end[0] - x) * dx + (end[1] - y) * dy, 0)
+                    self.assertGreater((x - start[0]) * dx + (y - start[1]) * dy, 0)
+                self.assertAlmostEqual((head[0][0] - end[0]) * dy - (head[0][1] - end[1]) * dx,
+                                       -((head[2][0] - end[0]) * dy - (head[2][1] - end[1]) * dx))
+
+    def test_head_grows_with_the_line_and_stays_wider_than_it(self):
+        for width in (2, 4, 10, 40):
+            with self.subTest(width=width):
+                _, head = Arrow((0, 0), (1000, 0), width, (0, 0, 0)).shape
+                self.assertEqual(1000 - head[0][0], max(14, width * 4))
+                self.assertGreater(head[0][1] - head[2][1], width)
+
+    def test_short_arrow_head_stays_between_tail_and_tip(self):
+        _, head = Arrow((0, 0), (4, 0), 16, (0, 0, 0)).shape
+        self.assertTrue(all(0 < x <= 4 for x, _ in head))
+        self.assertGreater(head[0][1] - head[2][1], 16)
+
+    def test_click_or_tiny_drag_has_no_arrow(self):
+        for end in ((0, 0), (1, 1)):
+            self.assertEqual(Arrow((0, 0), end, 4, (0, 0, 0)).shape, ())
+
+
+class SnapAngle(unittest.TestCase):
+    def test_snaps_to_the_nearest_45_degrees_keeping_length(self):
+        self.assertEqual(snap_angle(100, 10), (100.498756, 0))
+        self.assertEqual(snap_angle(-3, -100), (0, -100.044990))
+        x, y = snap_angle(100, 80)
+        self.assertAlmostEqual(x, y, places=5)
+        self.assertAlmostEqual(x * x + y * y, 100 ** 2 + 80 ** 2, places=3)
+
+    def test_no_offset_stays_put(self):
+        self.assertEqual(snap_angle(0, 0), (0, 0))
 
 
 class Toolbar(unittest.TestCase):

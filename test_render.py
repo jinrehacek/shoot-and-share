@@ -1,12 +1,13 @@
 import unittest
 
+import cairo
 import gi
 
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf  # noqa: E402
 
 from render import render  # noqa: E402
-from selection import Box, Output, Rect, Stroke  # noqa: E402
+from selection import Arrow, Box, Output, Rect, Stroke  # noqa: E402
 
 GRAY = (128, 128, 128)
 
@@ -52,6 +53,32 @@ class Render(unittest.TestCase):
         self.assertEqual(image.get_width(), 25)
         self.assertEqual(pixel(5, 5), GRAY)
         self.assertEqual(pixel(20, 5), (0, 0, 200))
+
+    def test_arrow_shaft_and_head_in_every_direction(self):
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)):
+            with self.subTest(direction=(dx, dy)):
+                end = (50 + dx * 30, 50 + dy * 30)
+                _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
+                                         [Arrow((50, 50), end, 4, (0, 0, 0))]))
+                self.assertEqual(pixel(50 + dx * 15, 50 + dy * 15), (0, 0, 0))
+                # The head must have painted pixels off the shaft near the tip.
+                self.assertTrue(any(pixel(x, y) == (0, 0, 0)
+                                    for x in range(end[0] - 14, end[0] + 15)
+                                    for y in range(end[1] - 14, end[1] + 15)
+                                    if abs((x - 50) * dy - (y - 50) * dx) >= 4))
+
+    def test_arrow_scales_and_translates_on_pdf_base(self):
+        base = cairo.ImageSurface(cairo.FORMAT_RGB24, 200, 100)
+        _, pixel = decode(render(Rect(100, 200, 100, 50), [], {},
+                                 [Arrow((110, 225), (180, 225), 4, (1, 1, 1))], base))
+        self.assertEqual(pixel(80, 50), (255, 255, 255))
+        self.assertEqual(pixel(142, 58), (255, 255, 255))
+        self.assertEqual(pixel(80, 60), (0, 0, 0))
+
+    def test_tiny_arrow_leaves_pixels_untouched(self):
+        _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
+                                 [Arrow((50, 50), (51, 51), 4, (0, 0, 0))]))
+        self.assertEqual(pixel(50, 50), GRAY)
 
 
 if __name__ == '__main__':

@@ -6,11 +6,11 @@ drag the inside to move, or drag outside to start again. Hold Ctrl while
 dragging to resize around the center. Arrow keys move the selection by one
 pixel; Shift+arrows resize it; Ctrl makes steps of ten.
 
-The toolbar under the selection hides things before saving: Box (R) covers a
-rectangle, Brush (B) paints freehand, and Pick (I) takes a color from the
-screen so a cover can match its background. V returns to adjusting the
-selection, 1-4 choose a color, [ ] or the scroll wheel size the brush, and
-Ctrl+Z undoes.
+The toolbar under the selection annotates the capture: Box (R) covers a
+rectangle, Brush (B) paints freehand, Arrow (A) points things out (Shift snaps
+it to 45 degrees), and Pick (I) takes a color from the screen so a cover can
+match its background. V returns to adjusting the selection, 1-4 choose a color,
+[ ] or the scroll wheel size the brush or arrow, and Ctrl+Z undoes.
 
 The 2× button (U) renders the selection again from the PDF open in Okular,
 at two or four times the screen resolution.
@@ -30,8 +30,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from selection import (MIN_NEW_SIZE, Box, Output, Rect, Stroke, centered_span, clamp, crop_plan, drag, restore,
-                       hit_test, nudge, place_toolbar, span_within)
+from selection import (MIN_NEW_SIZE, Arrow, Box, Output, Rect, Stroke, arrow_shape, centered_span, clamp, crop_plan,
+                       drag, restore, hit_test, nudge, place_toolbar, snap_angle, span_within)
 
 LAYER_SHELL = 'libgtk4-layer-shell.so.0'
 CANCELLED = 1
@@ -74,13 +74,15 @@ ACTIVE_BUTTON = Gdk.RGBA(red=.50, green=.78, blue=1, alpha=.35)
 HOVER_BUTTON = Gdk.RGBA(red=1, green=1, blue=1, alpha=.12)
 SWATCH_RING = Gdk.RGBA(red=.6, green=.6, blue=.65, alpha=1)
 
-# Toolbar: (tool, icon, tooltip). Colors follow, then undo.
+# Toolbar: (tool, icon, tooltip). Colors follow, then undo. Adwaita has no
+# arrow icon, only a "next" chevron, so the arrow draws its own.
 TOOLS = (('select', 'view-fullscreen-symbolic', 'Adjust selection  V'),
          ('box', 'media-playback-stop-symbolic', 'Box  R  ·  Ctrl from center'),
          ('brush', 'document-edit-symbolic', 'Brush  B  ·  [ ] or scroll to size'),
+         ('arrow', None, 'Arrow  A  ·  Drag tail to tip  ·  Shift snaps  ·  [ ] or scroll to size'),
          ('pick', 'color-select-symbolic', 'Pick a color from the screen  I'))
 ICONS = {tool: icon for tool, icon, _ in TOOLS}
-TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_i: 'pick'}
+TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_i: 'pick', Gdk.KEY_a: 'arrow'}
 COLORS = ((0, 0, 0), (1, 1, 1), (.86, .2, .2))  # The picked color is the fourth swatch.
 COLOR_NAMES = ('Black', 'White', 'Red', 'Picked color')
 BUTTON, GAP, PADDING, SEPARATOR = 32, 2, 5, 10
@@ -129,6 +131,19 @@ def round_stroke(width):
     return stroke
 
 
+def append_arrow(snapshot, shape, width, color):
+    if not shape:
+        return
+    shaft, head = shape
+    snapshot.append_stroke(stroke_path(shaft), round_stroke(width), color)
+    builder = Gsk.PathBuilder.new()
+    builder.move_to(*head[0])
+    for x, y in head[1:]:
+        builder.line_to(x, y)
+    builder.close()
+    snapshot.append_fill(builder.to_path(), Gsk.FillRule.WINDING, color)
+
+
 def capture(monitors):
     """Grab every output at once, before any overlay is visible."""
     def grab(monitor):
@@ -165,6 +180,7 @@ class Session:
         self.tool, self.draw_tool = 'select', 'box'
         self.color_index, self.picked = 0, (.5, .5, .5)
         self.brush = 16
+        self.arrow_width = 4
         self.annotations, self.current = [], None
         self.canvases, self.windows = [], []
         self.icons = {}
@@ -182,13 +198,13 @@ class Session:
 
     def set_tool(self, tool):
         self.tool = tool
-        if tool in ('box', 'brush'):
+        if tool in ('box', 'brush', 'arrow'):
             self.draw_tool = tool
         self.redraw()
 
     def drawing(self):
         """Whether a drag should paint instead of changing the selection."""
-        return self.selection and self.tool in ('box', 'brush')
+        return self.selection and self.tool in ('box', 'brush', 'arrow')
 
     def pixel_at(self, x, y):
         for output in self.outputs:
@@ -240,7 +256,7 @@ class Session:
             self.set_tool(item[1])
         elif item[0] == 'color':
             self.color_index = item[1]
-            if self.tool not in ('box', 'brush'):
+            if self.tool not in ('box', 'brush', 'arrow'):
                 self.set_tool(self.draw_tool)
             self.redraw()
         elif item[0] == 'undo':
@@ -266,7 +282,9 @@ class Session:
             self.current = Stroke([(x, y)], self.brush, self.color)
             self.redraw()
 
-    def update_drag(self, dx, dy, centered):
+    def update_drag(self, dx, dy, centered, snap=False):
+        """centered comes from Ctrl and resizes around the center; snap comes
+        from Shift and turns an arrow to the nearest 45 degrees."""
         drag_state = self.dragging
         drag_state.update(dx=dx, dy=dy)
         zone, x, y = drag_state['zone'], drag_state['x'], drag_state['y']
@@ -277,6 +295,10 @@ class Session:
                 self.selection = area
             else:
                 self.current = Box(area, self.color)
+        elif zone == 'arrow':
+            if snap:
+                dx, dy = snap_angle(dx, dy)
+            self.current = Arrow((x, y), (x + dx, y + dy), self.arrow_width, self.color)
         elif zone == 'brush':
             self.current.points.append((x + dx, y + dy))
         elif zone != 'ignore':
@@ -291,14 +313,24 @@ class Session:
             self.selection = start
         elif zone == 'box' and self.current and self.current.rect.w and self.current.rect.h:
             self.annotations.append(self.current)
+        elif zone == 'arrow' and self.current and self.current.shape:
+            self.annotations.append(self.current)
         elif zone == 'brush' and self.current:
             self.annotations.append(Stroke(tuple(self.current.points), self.current.width, self.current.color))
         self.current = None
         self.redraw()
 
+    def resize_stroke(self, factor):
+        attribute = 'arrow_width' if self.tool == 'arrow' else 'brush'
+        size = getattr(self, attribute)
+        # A wheel tick must change thin arrows too, even when rounding would not.
+        step = max(1, round(size * abs(factor - 1)))
+        setattr(self, attribute, clamp(size + (step if factor > 1 else -step), *BRUSH_SIZES))
+        self.redraw()
+
     def adjusting(self):
         """Whether the selection itself is being dragged; the toolbar hides meanwhile."""
-        return self.dragging and self.dragging['zone'] not in ('ignore', 'box', 'brush')
+        return self.dragging and self.dragging['zone'] not in ('ignore', 'box', 'brush', 'arrow')
 
     def redraw(self):
         self.schedule_search()
@@ -432,8 +464,8 @@ class Canvas(Gtk.Widget):
         session.pointer = point = self.global_point(x, y)
         if session.toolbar_item_at(*point):
             cursor = 'pointer'
-        elif session.tool == 'brush' and session.selection:
-            cursor = 'none'  # The brush outline replaces the pointer.
+        elif session.tool in ('brush', 'arrow') and session.selection:
+            cursor = 'none'  # The size outline replaces the pointer.
         elif session.drawing() or session.tool == 'pick':
             cursor = 'crosshair'
         elif session.dragging:
@@ -442,14 +474,15 @@ class Canvas(Gtk.Widget):
             cursor = CURSORS[hit_test(session.selection, *point)]
         self.set_cursor_from_name(cursor)
         if session.selection:
-            session.redraw()  # Toolbar hover, brush outline, and color preview follow the pointer.
+            session.redraw()  # Toolbar hover, size outline, and color preview follow the pointer.
 
     def on_drag_begin(self, _gesture, x, y):
         self.session.begin_drag(*self.global_point(x, y))
 
     def on_drag_update(self, gesture, dx, dy):
-        centered = bool(gesture.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK)
-        self.session.update_drag(dx, dy, centered)
+        state = gesture.get_current_event_state()
+        self.session.update_drag(dx, dy, bool(state & Gdk.ModifierType.CONTROL_MASK),
+                                 bool(state & Gdk.ModifierType.SHIFT_MASK))
 
     def on_drag_end(self, _gesture, _dx, _dy):
         self.session.end_drag()
@@ -468,10 +501,9 @@ class Canvas(Gtk.Widget):
 
     def on_scroll(self, _controller, _dx, dy):
         session = self.session
-        if session.tool != 'brush':
+        if session.tool not in ('brush', 'arrow'):
             return False
-        session.brush = clamp(round(session.brush * (1.15 if dy < 0 else 1 / 1.15)), *BRUSH_SIZES)
-        session.redraw()
+        session.resize_stroke(1.15 if dy < 0 else 1 / 1.15)
         return True
 
     def on_key(self, _controller, keyval, _keycode, state):
@@ -490,6 +522,8 @@ class Canvas(Gtk.Widget):
             session.undo()
         elif keyval in (Gdk.KEY_Control_L, Gdk.KEY_Control_R):
             self.on_control(True)
+        elif keyval in (Gdk.KEY_Shift_L, Gdk.KEY_Shift_R):
+            return self.on_shift(True)
         elif keyval in ARROWS and session.selection:
             dx, dy = ARROWS[keyval]
             step = 10 if control else 1
@@ -504,8 +538,7 @@ class Canvas(Gtk.Widget):
             session.activate(('color', keyval - Gdk.KEY_1))
         elif keyval in (Gdk.KEY_bracketleft, Gdk.KEY_bracketright):
             factor = 1.25 if keyval == Gdk.KEY_bracketright else 1 / 1.25
-            session.brush = clamp(round(session.brush * factor), *BRUSH_SIZES)
-            session.redraw()
+            session.resize_stroke(factor)
         else:
             return False
         return True
@@ -513,12 +546,22 @@ class Canvas(Gtk.Widget):
     def on_key_released(self, _controller, keyval, _keycode, _state):
         if keyval in (Gdk.KEY_Control_L, Gdk.KEY_Control_R):
             self.on_control(False)
+        elif keyval in (Gdk.KEY_Shift_L, Gdk.KEY_Shift_R):
+            self.on_shift(False)
 
     def on_control(self, held):
         """Pressing or releasing Ctrl mid-drag switches centered resizing at once."""
         drag_state = self.session.dragging
-        if drag_state and drag_state['zone'] not in ('ignore', 'brush', 'move'):
+        if drag_state and drag_state['zone'] not in ('ignore', 'brush', 'arrow', 'move'):
             self.session.update_drag(drag_state['dx'], drag_state['dy'], held)
+
+    def on_shift(self, held):
+        """Pressing or releasing Shift mid-drag snaps or frees the arrow at once."""
+        drag_state = self.session.dragging
+        if not (drag_state and drag_state['zone'] == 'arrow'):
+            return False
+        self.session.update_drag(drag_state['dx'], drag_state['dy'], False, held)
+        return True
 
     def do_snapshot(self, snapshot):
         session, area = self.session, self.output.rect
@@ -555,6 +598,8 @@ class Canvas(Gtk.Widget):
         if isinstance(annotation, Box):
             r = annotation.rect
             snapshot.append_color(rgba(annotation.color), rect(r.x, r.y, r.w, r.h))
+        elif isinstance(annotation, Arrow):
+            append_arrow(snapshot, annotation.shape, annotation.width, rgba(annotation.color))
         else:
             snapshot.append_stroke(stroke_path(annotation.points), round_stroke(annotation.width),
                                    rgba(annotation.color))
@@ -593,6 +638,9 @@ class Canvas(Gtk.Widget):
                 ring = 24 if active else 20 if item == hovered else 18
                 self.dot(snapshot, ACCENT if active else SWATCH_RING, center_x - ring / 2, center_y - ring / 2, ring)
                 self.dot(snapshot, rgba((*COLORS, session.picked)[item[1]]), center_x - 8, center_y - 8, 16)
+            elif item == ('tool', 'arrow'):
+                append_arrow(snapshot, arrow_shape((area.x + 10, area.y + 22), (area.x + 22, area.y + 10), 2, head=7),
+                             2, WHITE)
             else:
                 name = 'edit-undo-symbolic' if item[0] == 'undo' else ICONS[item[1]]
                 faded = item[0] == 'undo' and not session.annotations
@@ -621,9 +669,12 @@ class Canvas(Gtk.Widget):
         x, y = session.pointer
         if session.toolbar_item_at(x, y):
             return
-        if session.tool == 'brush':
+        if session.tool in ('brush', 'arrow'):
+            if session.dragging and session.dragging['zone'] == 'arrow':
+                return  # The arrow itself shows the size while drawing.
+            size = session.brush if session.tool == 'brush' else session.arrow_width
             builder = Gsk.PathBuilder.new()
-            builder.add_circle(Graphene.Point().init(x, y), max(session.brush / 2, 2))
+            builder.add_circle(Graphene.Point().init(x, y), max(size / 2, 2))
             circle = builder.to_path()
             snapshot.append_stroke(circle, Gsk.Stroke.new(3), BLACK)
             snapshot.append_stroke(circle, Gsk.Stroke.new(1.5), WHITE)

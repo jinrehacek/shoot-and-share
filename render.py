@@ -7,7 +7,7 @@ import gi
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf  # noqa: E402
 
-from selection import Box, Rect, Stroke, cover_pixels, crop_plan  # noqa: E402
+from selection import Arrow, Box, Rect, Stroke, cover_pixels, crop_plan  # noqa: E402
 
 
 def crop(selection, outputs, pixbufs):
@@ -52,7 +52,10 @@ def render(selection, outputs, pixbufs, annotations=(), base=None):
             context.set_antialias(cairo.ANTIALIAS_NONE)
             context.rectangle(*cover_pixels(local, scale_x, scale_y))
             context.fill()
-        elif isinstance(annotation, Stroke):
+        elif isinstance(annotation, (Stroke, Arrow)):
+            shape = annotation.shape if isinstance(annotation, Arrow) else None
+            if isinstance(annotation, Arrow) and not shape:
+                continue
             context.save()
             context.set_antialias(cairo.ANTIALIAS_DEFAULT)
             context.scale(scale_x, scale_y)
@@ -60,11 +63,17 @@ def render(selection, outputs, pixbufs, annotations=(), base=None):
             context.set_line_width(annotation.width)
             context.set_line_cap(cairo.LINE_CAP_ROUND)
             context.set_line_join(cairo.LINE_JOIN_ROUND)
-            (x, y), *rest = annotation.points
+            (x, y), *rest = shape[0] if shape else annotation.points
             context.move_to(x, y)
             for x, y in rest or [(x, y)]:  # A single click still leaves a dot.
                 context.line_to(x, y)
             context.stroke()
+            if shape:
+                context.move_to(*shape[1][0])
+                for point in shape[1][1:]:
+                    context.line_to(*point)
+                context.close_path()
+                context.fill()
             context.restore()
     buffer = io.BytesIO()
     surface.write_to_png(buffer)

@@ -202,6 +202,42 @@ class Stroke:
     color: tuple
 
 
+@dataclass(frozen=True)
+class Arrow:
+    """A straight arrow from tail to tip in global logical coordinates."""
+    start: tuple
+    end: tuple
+    width: float
+    color: tuple
+
+    @property
+    def shape(self):
+        """Shaft and filled head, shared by the overlay and PNG renderer."""
+        return arrow_shape(self.start, self.end, self.width)
+
+
+def arrow_shape(start, end, width, head=None):
+    """The shaft as (tail, head base) and the head as a triangle, or () for a click.
+    The head grows with the line so thick arrows stay readable, but never takes
+    more than most of a short arrow."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length < MIN_NEW_SIZE:
+        return ()
+    ux, uy = dx / length, dy / length
+    head = min(head or max(14, width * 4), length * .6)
+    wing = max(head * .5, width)  # The base stays wider than the shaft.
+    x, y = end[0] - ux * head, end[1] - uy * head
+    return ((start, (x, y)), ((x - uy * wing, y + ux * wing), end, (x + uy * wing, y - ux * wing)))
+
+
+def snap_angle(dx, dy):
+    """An offset turned to the nearest multiple of 45 degrees, keeping its length."""
+    length = math.hypot(dx, dy)
+    angle = round(math.atan2(dy, dx) / (math.pi / 4)) * math.pi / 4
+    return round(length * math.cos(angle), 6), round(length * math.sin(angle), 6)
+
+
 def cover_pixels(rect, scale_x, scale_y):
     """Whole result pixels a box covers, rounded outward so no partly covered
     pixel lets the hidden content show through. rect is relative to the selection."""
