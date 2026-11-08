@@ -72,7 +72,8 @@ class Render(unittest.TestCase):
         _, pixel = decode(render(Rect(100, 200, 100, 50), [], {},
                                  [Arrow((110, 225), (180, 225), 4, (1, 1, 1))], base))
         self.assertEqual(pixel(80, 50), (255, 255, 255))
-        self.assertEqual(pixel(142, 58), (255, 255, 255))
+        # Logical (168.25, 228.25): inside the head, 3.25 off the axis, past the shaft's 2.
+        self.assertEqual(pixel(136, 56), (255, 255, 255))
         self.assertEqual(pixel(80, 60), (0, 0, 0))
 
     def test_tiny_arrow_leaves_pixels_untouched(self):
