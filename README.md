@@ -42,11 +42,15 @@ A toolbar appears under the selection. Annotations land in the saved PNG.
 |------|-----|-----|
 | Adjust | V | Move and resize the selection (default) |
 | Box | R | Drag a solid rectangle; its edges round outward to whole pixels |
-| Brush | B | Paint freehand; `[` `]` or the scroll wheel change the size |
-| Arrow | A | Drag from tail to tip; Shift snaps to 45°; `[` `]` or the scroll wheel change thickness |
+| Brush | B | Paint freehand |
+| Arrow | A | Drag from tail to tip; Shift snaps to 45° |
+| Text | T | Click and type; Enter or Escape finishes, Shift+Enter starts a new line |
 | Pick | I | Click to take a color from the screen, then return to the drawing tool |
 
-Keys 1–4 choose black, white, red, or the picked color. Ctrl+Z undoes.
+Q and W make the brush, arrow, or text smaller and bigger; `[` `]` and the
+scroll wheel do the same. Keys 1–4 choose black, white, red, or the picked
+color. Ctrl+Z undoes, or drops the text being typed. Text gets a thin black
+or white outline so it reads on any background.
 To hide text on a colored background, pick that background and box over the text.
 
 ## Sharper from PDFs

@@ -7,7 +7,7 @@ gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf  # noqa: E402
 
 from render import render  # noqa: E402
-from selection import Arrow, Box, Output, Rect, Stroke  # noqa: E402
+from selection import Arrow, Box, Output, Rect, Stroke, Text  # noqa: E402
 
 GRAY = (128, 128, 128)
 
@@ -80,6 +80,21 @@ class Render(unittest.TestCase):
         _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
                                  [Arrow((50, 50), (51, 51), 4, (0, 0, 0))]))
         self.assertEqual(pixel(50, 50), GRAY)
+
+    def test_text_has_its_color_and_an_outline(self):
+        # Glyph shapes depend on the installed fonts, so look for colors, not exact pixels.
+        _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
+                                 [Text((10, 50), 'HH', 30, (1, 0, 0))]))
+        colors = {pixel(x, y) for x in range(5, 95) for y in range(30, 70)}
+        self.assertIn((255, 0, 0), colors)
+        self.assertIn((255, 255, 255), colors)  # Red is dark, so its outline is white.
+        self.assertEqual(pixel(50, 10), GRAY)
+        self.assertEqual(pixel(50, 90), GRAY)
+
+    def test_empty_text_leaves_pixels_untouched(self):
+        _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
+                                 [Text((10, 50), '', 30, (0, 0, 0))]))
+        self.assertTrue(all(pixel(x, y) == GRAY for x in range(0, 100, 5) for y in range(0, 100, 5)))
 
 
 if __name__ == '__main__':

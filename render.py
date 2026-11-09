@@ -5,9 +5,80 @@ import cairo
 import gi
 
 gi.require_version('GdkPixbuf', '2.0')
-from gi.repository import GdkPixbuf  # noqa: E402
+gi.require_version('Pango', '1.0')
+gi.require_version('PangoCairo', '1.0')
+from gi.repository import GdkPixbuf, Pango, PangoCairo  # noqa: E402
 
-from selection import Arrow, Box, Rect, Stroke, cover_pixels, crop_plan  # noqa: E402
+from selection import Arrow, Box, Rect, Stroke, Text, cover_pixels, crop_plan  # noqa: E402
+
+TEXT_FONT = 'Sans Bold'
+# Measures text for the overlay, which needs bounds before it can draw.
+MEASURE = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+
+
+def text_layout(context, text):
+    """The layout for a Text on a cairo context. Unhinted metrics keep the
+    overlay, the PNG, and the 2x or 4x PDF render the same width."""
+    layout = PangoCairo.create_layout(context)
+    options = cairo.FontOptions()
+    options.set_hint_metrics(cairo.HINT_METRICS_OFF)
+    options.set_hint_style(cairo.HINT_STYLE_NONE)
+    PangoCairo.context_set_font_options(layout.get_context(), options)
+    layout.context_changed()
+    font = Pango.FontDescription.from_string(TEXT_FONT)
+    font.set_absolute_size(text.size * Pango.SCALE)
+    layout.set_font_description(font)
+    layout.set_text(text.text, -1)
+    return layout
+
+
+def text_origin(layout, text):
+    """Top-left of the layout, so the first line is centered on the anchor."""
+    _, line = layout.get_line_readonly(0).get_extents()
+    return text.anchor[0], text.anchor[1] - line.height / Pango.SCALE / 2
+
+
+def halo_width(text):
+    return max(2, text.size * .16)
+
+
+def halo_color(color):
+    """Black around light text and white around dark text, so it reads on any background."""
+    luminance = .2126 * color[0] + .7152 * color[1] + .0722 * color[2]
+    return (0, 0, 0) if luminance > .5 else (1, 1, 1)
+
+
+def paint_text(context, text):
+    layout = text_layout(context, text)
+    context.move_to(*text_origin(layout, text))
+    PangoCairo.layout_path(context, layout)
+    context.set_line_join(cairo.LINE_JOIN_ROUND)
+    context.set_line_width(halo_width(text))
+    context.set_source_rgb(*halo_color(text.color))
+    context.stroke_preserve()
+    context.set_source_rgb(*text.color)
+    context.fill()
+
+
+def text_bounds(text):
+    """(x, y, w, h) a Text covers with its halo, in global logical coordinates."""
+    layout = text_layout(MEASURE, text)
+    x, y = text_origin(layout, text)
+    ink, logical = layout.get_extents()
+    left = min(ink.x, logical.x) / Pango.SCALE
+    top = min(ink.y, logical.y) / Pango.SCALE
+    right = max(ink.x + ink.width, logical.x + logical.width) / Pango.SCALE
+    bottom = max(ink.y + ink.height, logical.y + logical.height) / Pango.SCALE
+    pad = halo_width(text) / 2 + 2
+    return x + left - pad, y + top - pad, right - left + 2 * pad, bottom - top + 2 * pad
+
+
+def text_caret(text):
+    """(x, y, height) of the caret after the last character."""
+    layout = text_layout(MEASURE, text)
+    x, y = text_origin(layout, text)
+    strong, _ = layout.get_cursor_pos(len(text.text.encode()))  # Pango counts UTF-8 bytes.
+    return x + strong.x / Pango.SCALE, y + strong.y / Pango.SCALE, strong.height / Pango.SCALE
 
 
 def crop(selection, outputs, pixbufs):
@@ -74,6 +145,13 @@ def render(selection, outputs, pixbufs, annotations=(), base=None):
                     context.line_to(*point)
                 context.close_path()
                 context.fill()
+            context.restore()
+        elif isinstance(annotation, Text):
+            context.save()
+            context.set_antialias(cairo.ANTIALIAS_DEFAULT)
+            context.scale(scale_x, scale_y)
+            context.translate(-selection.x, -selection.y)
+            paint_text(context, annotation)
             context.restore()
     buffer = io.BytesIO()
     surface.write_to_png(buffer)

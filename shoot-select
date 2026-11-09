@@ -8,9 +8,11 @@ pixel; Shift+arrows resize it; Ctrl makes steps of ten.
 
 The toolbar under the selection annotates the capture: Box (R) covers a
 rectangle, Brush (B) paints freehand, Arrow (A) points things out (Shift snaps
-it to 45 degrees), and Pick (I) takes a color from the screen so a cover can
-match its background. V returns to adjusting the selection, 1-4 choose a color,
-[ ] or the scroll wheel size the brush or arrow, and Ctrl+Z undoes.
+it to 45 degrees), Text (T) types where you click (Enter or Escape finishes,
+Shift+Enter starts a new line), and Pick (I) takes a color from the screen so a
+cover can match its background. V returns to adjusting the selection, 1-4
+choose a color, Q and W (or [ ] or the scroll wheel) make the brush, arrow, or
+text smaller and bigger, and Ctrl+Z undoes.
 
 The 2× button (U) renders the selection again from the PDF open in Okular,
 at two or four times the screen resolution.
@@ -28,10 +30,11 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
-from selection import (MIN_NEW_SIZE, Arrow, Box, Output, Rect, Stroke, arrow_shape, centered_span, clamp, crop_plan,
-                       drag, restore, hit_test, nudge, place_toolbar, snap_angle, span_within)
+from selection import (MIN_NEW_SIZE, Arrow, Box, Output, Rect, Stroke, Text, arrow_shape, centered_span, clamp,
+                       crop_plan, drag, restore, hit_test, nudge, place_toolbar, snap_angle, span_within)
 
 LAYER_SHELL = 'libgtk4-layer-shell.so.0'
 CANCELLED = 1
@@ -58,7 +61,7 @@ gi.require_version('Gtk4LayerShell', '1.0')
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk  # noqa: E402
 from gi.repository import Gtk4LayerShell as LayerShell  # noqa: E402
 
-from render import crop, render  # noqa: E402
+from render import crop, halo_color, paint_text, render, text_bounds, text_caret  # noqa: E402
 
 DIM = Gdk.RGBA(red=0, green=0, blue=0, alpha=.45)
 ACCENT = Gdk.RGBA(red=.50, green=.78, blue=1, alpha=1)
@@ -75,14 +78,19 @@ HOVER_BUTTON = Gdk.RGBA(red=1, green=1, blue=1, alpha=.12)
 SWATCH_RING = Gdk.RGBA(red=.6, green=.6, blue=.65, alpha=1)
 
 # Toolbar: (tool, icon, tooltip). Colors follow, then undo. Adwaita has no
-# arrow icon, only a "next" chevron, so the arrow draws its own.
+# arrow or text-tool icon, so those two draw their own.
 TOOLS = (('select', 'view-fullscreen-symbolic', 'Adjust selection  V'),
          ('box', 'media-playback-stop-symbolic', 'Box  R  ·  Ctrl from center'),
-         ('brush', 'document-edit-symbolic', 'Brush  B  ·  [ ] or scroll to size'),
-         ('arrow', None, 'Arrow  A  ·  Drag tail to tip  ·  Shift snaps  ·  [ ] or scroll to size'),
+         ('brush', 'document-edit-symbolic', 'Brush  B  ·  Q W or scroll to size'),
+         ('arrow', None, 'Arrow  A  ·  Drag tail to tip  ·  Shift snaps  ·  Q W or scroll to size'),
+         ('text', None, 'Text  T  ·  Click and type  ·  Enter finishes  ·  Q W or scroll to size'),
          ('pick', 'color-select-symbolic', 'Pick a color from the screen  I'))
 ICONS = {tool: icon for tool, icon, _ in TOOLS}
-TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_i: 'pick', Gdk.KEY_a: 'arrow'}
+TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_i: 'pick', Gdk.KEY_a: 'arrow',
+             Gdk.KEY_t: 'text'}
+DRAW_TOOLS = ('box', 'brush', 'arrow', 'text')
+# Q and W sit under the left hand, which also has the tool keys; [ ] still work.
+SIZE_KEYS = {Gdk.KEY_q: 1 / 1.25, Gdk.KEY_w: 1.25, Gdk.KEY_bracketleft: 1 / 1.25, Gdk.KEY_bracketright: 1.25}
 COLORS = ((0, 0, 0), (1, 1, 1), (.86, .2, .2))  # The picked color is the fourth swatch.
 COLOR_NAMES = ('Black', 'White', 'Red', 'Picked color')
 BUTTON, GAP, PADDING, SEPARATOR = 32, 2, 5, 10
@@ -91,6 +99,7 @@ SEARCH_DELAY = 250  # Milliseconds without selection changes before looking for 
 SEARCH_WAIT = 35  # Seconds Enter waits for a running PDF search before saving at 1×.
 UPSCALE = Path(__file__).resolve().with_name('upscale.py')
 BRUSH_SIZES = (2, 400)
+TEXT_SIZES = (8, 200)
 
 CURSORS = {
     None: 'crosshair', 'move': 'move',
@@ -181,7 +190,10 @@ class Session:
         self.color_index, self.picked = 0, (.5, .5, .5)
         self.brush = 16
         self.arrow_width = 4
+        self.text_size = 24
         self.annotations, self.current = [], None
+        self.editing = None  # The Text being typed, until Enter, Escape, or a click elsewhere.
+        self.im = None  # Input method for typing, so dead keys and compose work.
         self.canvases, self.windows = [], []
         self.icons = {}
         self.upscale = 1
@@ -197,14 +209,15 @@ class Session:
         return (*COLORS, self.picked)[self.color_index]
 
     def set_tool(self, tool):
+        self.commit_text()
         self.tool = tool
-        if tool in ('box', 'brush', 'arrow'):
+        if tool in DRAW_TOOLS:
             self.draw_tool = tool
         self.redraw()
 
     def drawing(self):
         """Whether a drag should paint instead of changing the selection."""
-        return self.selection and self.tool in ('box', 'brush', 'arrow')
+        return self.selection and self.tool in DRAW_TOOLS
 
     def pixel_at(self, x, y):
         for output in self.outputs:
@@ -221,8 +234,44 @@ class Session:
             self.picked, self.color_index = color, len(COLORS)
             self.set_tool(self.draw_tool)
 
+    def start_text(self, x, y):
+        self.commit_text()
+        self.editing = Text((x, y), '', self.text_size, self.color)
+        if self.im:
+            canvas = next(canvas for canvas in self.canvases if canvas.output == self.pointer_output)
+            self.im.set_client_widget(canvas)
+            self.im.focus_in()
+        self.redraw()
+
+    def type_text(self, text):
+        if self.editing is not None:
+            self.editing = replace(self.editing, text=self.editing.text + text)
+            self.redraw()
+
+    def erase(self):
+        if self.editing is not None:
+            self.editing = replace(self.editing, text=self.editing.text[:-1])
+            self.redraw()
+
+    def commit_text(self):
+        """Keep the typed text, unless it is only whitespace, and stop typing."""
+        if self.editing is None:
+            return
+        if self.editing.text.strip():
+            self.annotations.append(self.editing)
+        self.stop_text()
+
+    def stop_text(self):
+        self.editing = None
+        if self.im:
+            self.im.focus_out()
+            self.im.reset()
+        self.redraw()
+
     def undo(self):
-        if self.annotations:
+        if self.editing is not None:
+            self.stop_text()  # Ctrl+Z while typing drops the text being typed.
+        elif self.annotations:
             self.annotations.pop()
             self.redraw()
 
@@ -256,7 +305,9 @@ class Session:
             self.set_tool(item[1])
         elif item[0] == 'color':
             self.color_index = item[1]
-            if self.tool not in ('box', 'brush', 'arrow'):
+            if self.editing is not None:
+                self.editing = replace(self.editing, color=self.color)
+            if self.tool not in DRAW_TOOLS:
                 self.set_tool(self.draw_tool)
             self.redraw()
         elif item[0] == 'undo':
@@ -272,6 +323,9 @@ class Session:
             zone = 'ignore'
         elif self.tool == 'pick':
             self.pick(x, y)
+            zone = 'ignore'
+        elif self.drawing() and self.tool == 'text':
+            self.start_text(x, y)
             zone = 'ignore'
         elif self.drawing():
             zone = self.tool
@@ -321,11 +375,14 @@ class Session:
         self.redraw()
 
     def resize_stroke(self, factor):
-        attribute = 'arrow_width' if self.tool == 'arrow' else 'brush'
+        attribute, limits = {'arrow': ('arrow_width', BRUSH_SIZES),
+                             'text': ('text_size', TEXT_SIZES)}.get(self.tool, ('brush', BRUSH_SIZES))
         size = getattr(self, attribute)
         # A wheel tick must change thin arrows too, even when rounding would not.
         step = max(1, round(size * abs(factor - 1)))
-        setattr(self, attribute, clamp(size + (step if factor > 1 else -step), *BRUSH_SIZES))
+        setattr(self, attribute, clamp(size + (step if factor > 1 else -step), *limits))
+        if self.editing is not None:
+            self.editing = replace(self.editing, size=self.text_size)
         self.redraw()
 
     def adjusting(self):
@@ -410,6 +467,7 @@ class Session:
         return self.icons[name]
 
     def finish(self, action):
+        self.commit_text()
         # Ignore confirmation without a selection or with one in a gap between monitors.
         if action and not (self.selection and crop_plan(self.selection, self.outputs)[2]):
             return
@@ -464,6 +522,8 @@ class Canvas(Gtk.Widget):
         session.pointer = point = self.global_point(x, y)
         if session.toolbar_item_at(*point):
             cursor = 'pointer'
+        elif session.tool == 'text' and session.selection:
+            cursor = 'text'
         elif session.tool in ('brush', 'arrow') and session.selection:
             cursor = 'none'  # The size outline replaces the pointer.
         elif session.drawing() or session.tool == 'pick':
@@ -501,13 +561,34 @@ class Canvas(Gtk.Widget):
 
     def on_scroll(self, _controller, _dx, dy):
         session = self.session
-        if session.tool not in ('brush', 'arrow'):
+        if session.tool not in ('brush', 'arrow', 'text'):
             return False
         session.resize_stroke(1.15 if dy < 0 else 1 / 1.15)
         return True
 
-    def on_key(self, _controller, keyval, _keycode, state):
+    def edit_text(self, controller, keyval, state):
+        """Typing goes to the text before any shortcut. Ctrl shortcuts still
+        work: Ctrl+Z drops the text, Ctrl+C keeps it and copies."""
         session = self.session
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and state & Gdk.ModifierType.SHIFT_MASK:
+            session.type_text('\n')
+        elif keyval in (Gdk.KEY_Escape, Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            session.commit_text()
+        elif keyval == Gdk.KEY_BackSpace:
+            session.erase()
+        elif state & Gdk.ModifierType.CONTROL_MASK:
+            return False
+        elif not (session.im and session.im.filter_keypress(controller.get_current_event())):
+            # Without a working input method, still type plain characters.
+            character = chr(Gdk.keyval_to_unicode(keyval) or 0)
+            if character.isprintable():
+                session.type_text(character)
+        return True
+
+    def on_key(self, controller, keyval, _keycode, state):
+        session = self.session
+        if session.editing is not None and self.edit_text(controller, keyval, state):
+            return True
         control = bool(state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         if keyval == Gdk.KEY_Escape:
@@ -536,14 +617,16 @@ class Canvas(Gtk.Widget):
             session.set_tool(TOOL_KEYS[Gdk.keyval_to_lower(keyval)])
         elif Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(COLORS) + 1:
             session.activate(('color', keyval - Gdk.KEY_1))
-        elif keyval in (Gdk.KEY_bracketleft, Gdk.KEY_bracketright):
-            factor = 1.25 if keyval == Gdk.KEY_bracketright else 1 / 1.25
-            session.resize_stroke(factor)
+        elif Gdk.keyval_to_lower(keyval) in SIZE_KEYS:
+            session.resize_stroke(SIZE_KEYS[Gdk.keyval_to_lower(keyval)])
         else:
             return False
         return True
 
-    def on_key_released(self, _controller, keyval, _keycode, _state):
+    def on_key_released(self, controller, keyval, _keycode, _state):
+        session = self.session
+        if session.editing is not None and session.im:
+            session.im.filter_keypress(controller.get_current_event())  # Compose sequences need releases.
         if keyval in (Gdk.KEY_Control_L, Gdk.KEY_Control_R):
             self.on_control(False)
         elif keyval in (Gdk.KEY_Shift_L, Gdk.KEY_Shift_R):
@@ -569,8 +652,10 @@ class Canvas(Gtk.Widget):
         snapshot.translate(Graphene.Point().init(-area.x, -area.y))
         snapshot.append_scaled_texture(self.texture, Gsk.ScalingFilter.NEAREST,
                                        rect(area.x, area.y, area.w, area.h))
-        for annotation in [*session.annotations, *filter(None, [session.current])]:
+        for annotation in [*session.annotations, *filter(None, [session.current, session.editing])]:
             self.draw_annotation(snapshot, annotation)
+        if session.editing is not None:
+            self.draw_caret(snapshot, session.editing)
         selection = session.selection
         visible = selection and selection.intersect(area)
         if not visible:
@@ -600,9 +685,19 @@ class Canvas(Gtk.Widget):
             snapshot.append_color(rgba(annotation.color), rect(r.x, r.y, r.w, r.h))
         elif isinstance(annotation, Arrow):
             append_arrow(snapshot, annotation.shape, annotation.width, rgba(annotation.color))
+        elif isinstance(annotation, Text):
+            if annotation.text:
+                paint_text(snapshot.append_cairo(rect(*text_bounds(annotation))), annotation)
         else:
             snapshot.append_stroke(stroke_path(annotation.points), round_stroke(annotation.width),
                                    rgba(annotation.color))
+
+    @staticmethod
+    def draw_caret(snapshot, text):
+        x, y, height = text_caret(text)
+        width = max(2, text.size / 12)
+        snapshot.append_color(rgba(halo_color(text.color)), rect(x - 1, y - 1, width + 2, height + 2))
+        snapshot.append_color(rgba(text.color), rect(x, y, width, height))
 
     def draw_toolbar(self, snapshot):
         session = self.session
@@ -638,6 +733,15 @@ class Canvas(Gtk.Widget):
                 ring = 24 if active else 20 if item == hovered else 18
                 self.dot(snapshot, ACCENT if active else SWATCH_RING, center_x - ring / 2, center_y - ring / 2, ring)
                 self.dot(snapshot, rgba((*COLORS, session.picked)[item[1]]), center_x - 8, center_y - 8, 16)
+            elif item == ('tool', 'text'):
+                layout = self.create_pango_layout(None)
+                layout.set_markup('<span size="large" weight="bold">T</span>', -1)
+                text_w, text_h = layout.get_pixel_size()
+                snapshot.save()
+                snapshot.translate(Graphene.Point().init(area.x + (area.w - text_w) / 2,
+                                                         area.y + (area.h - text_h) / 2))
+                snapshot.append_layout(layout, WHITE)
+                snapshot.restore()
             elif item == ('tool', 'arrow'):
                 append_arrow(snapshot, arrow_shape((area.x + 10, area.y + 22), (area.x + 22, area.y + 10), 2, head=7),
                              2, WHITE)
@@ -822,6 +926,8 @@ def main():
                               pixbuf.get_width(), pixbuf.get_height()))
     session = Session(outputs, {output.name: pixbuf for output, pixbuf in zip(outputs, pixbufs)},
                       restore(args.initial or load_last_selection(), outputs))
+    session.im = Gtk.IMMulticontext()
+    session.im.connect('commit', lambda _im, text: session.type_text(text))
     for monitor, output, pixbuf in zip(monitors, outputs, pixbufs):
         open_window(session, monitor, output, texture_for(pixbuf))
     session.loop.run()
