@@ -216,16 +216,6 @@ class Arrow:
         return arrow_shape(self.start, self.end, self.width)
 
 
-@dataclass(frozen=True)
-class Text:
-    """Typed text in global logical coordinates. The anchor is the left end of
-    the first line's middle, where the user clicked."""
-    anchor: tuple
-    text: str
-    size: float
-    color: tuple
-
-
 def arrow_shape(start, end, width, head=None):
     """The shaft as (tail, head base) and the head as a triangle, or () for a click.
     The head grows with the line so thick arrows stay readable, but never takes
