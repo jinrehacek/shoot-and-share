@@ -47,7 +47,8 @@ A toolbar appears under the selection. Annotations land in the saved PNG.
 | Pick | I | Click to take a color from the screen, then return to the drawing tool |
 
 Q and W make the brush or arrow smaller and bigger; `[` `]` and the scroll wheel
-do the same. Keys 1–4 choose black, white, red, or the picked color. Ctrl+Z undoes.
+do the same. Keys 1–4 choose black, white, red, or the picked color. Arrows
+start red and boxes and brushes black, until you choose a color. Ctrl+Z undoes.
 To hide text on a colored background, pick that background and box over the text.
 
 ## Sharper from PDFs

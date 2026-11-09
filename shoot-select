@@ -9,9 +9,9 @@ pixel; Shift+arrows resize it; Ctrl makes steps of ten.
 The toolbar under the selection annotates the capture: Box (R) covers a
 rectangle, Brush (B) paints freehand, Arrow (A) points things out (Shift snaps
 it to 45 degrees), and Pick (I) takes a color from the screen so a cover can
-match its background. V returns to adjusting the selection, 1-4 choose a color,
-Q and W (or [ ] or the scroll wheel) make the brush or arrow smaller and bigger,
-and Ctrl+Z undoes.
+match its background. V returns to adjusting the selection, 1-4 choose a color
+(arrows start red, the rest black), Q and W (or [ ] or the scroll wheel) make
+the brush or arrow smaller and bigger, and Ctrl+Z undoes.
 
 The 2× button (U) renders the selection again from the PDF open in Okular,
 at two or four times the screen resolution.
@@ -87,6 +87,9 @@ TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_b: 'brush', Gdk.KEY_
 # Q and W sit under the left hand, which also has the tool keys; [ ] still work.
 SIZE_KEYS = {Gdk.KEY_q: 1 / 1.25, Gdk.KEY_w: 1.25, Gdk.KEY_bracketleft: 1 / 1.25, Gdk.KEY_bracketright: 1.25}
 COLORS = ((0, 0, 0), (1, 1, 1), (.86, .2, .2))  # The picked color is the fourth swatch.
+RED = 2
+# Each tool's color until the user chooses one: arrows point things out, boxes hide them.
+DEFAULT_COLORS = {'box': 0, 'brush': 0, 'arrow': RED}
 COLOR_NAMES = ('Black', 'White', 'Red', 'Picked color')
 BUTTON, GAP, PADDING, SEPARATOR = 32, 2, 5, 10
 UPSCALE_STEPS = {1: 2, 2: 4, 4: 1}
@@ -182,6 +185,7 @@ class Session:
         self.pointer_output = outputs[0]
         self.tool, self.draw_tool = 'select', 'box'
         self.color_index, self.picked = 0, (.5, .5, .5)
+        self.color_chosen = False  # A swatch or Pick then applies to every tool.
         self.brush = 16
         self.arrow_width = 4
         self.annotations, self.current = [], None
@@ -203,6 +207,8 @@ class Session:
         self.tool = tool
         if tool in ('box', 'brush', 'arrow'):
             self.draw_tool = tool
+            if not self.color_chosen:
+                self.color_index = DEFAULT_COLORS[tool]
         self.redraw()
 
     def drawing(self):
@@ -222,6 +228,7 @@ class Session:
         color = self.pixel_at(x, y)
         if color:
             self.picked, self.color_index = color, len(COLORS)
+            self.color_chosen = True
             self.set_tool(self.draw_tool)
 
     def undo(self):
@@ -258,7 +265,7 @@ class Session:
         if item[0] == 'tool':
             self.set_tool(item[1])
         elif item[0] == 'color':
-            self.color_index = item[1]
+            self.color_index, self.color_chosen = item[1], True
             if self.tool not in ('box', 'brush', 'arrow'):
                 self.set_tool(self.draw_tool)
             self.redraw()
