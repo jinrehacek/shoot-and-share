@@ -3,6 +3,7 @@ import io
 
 import cairo
 import gi
+import numpy as np
 
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf  # noqa: E402
@@ -27,15 +28,33 @@ def crop(selection, outputs, pixbufs):
     return result
 
 
-def render(selection, outputs, pixbufs, annotations=(), base=None):
+def remove_white_background(surface):
+    """Copy to ARGB32 and clear exact white pixels, preserving all other pixels."""
+    result = cairo.ImageSurface(cairo.FORMAT_ARGB32, surface.get_width(), surface.get_height())
+    context = cairo.Context(result)
+    context.set_source_surface(surface)
+    context.paint()
+    result.flush()
+    # Cairo's native-endian ARGB32 is a premultiplied 0xAARRGGBB word.
+    pixels = np.ndarray((result.get_height(), result.get_width()), dtype=np.uint32,
+                        buffer=result.get_data(), strides=(result.get_stride(), 4))
+    alpha = pixels >> 24
+    white = (alpha > 0) & ((pixels & 0xffffff) == alpha * 0x010101)
+    pixels[white] = 0
+    result.mark_dirty()
+    return result
+
+
+def render(selection, outputs, pixbufs, annotations=(), base=None, remove_white=False):
     """PNG bytes of the selection with annotations painted on.
 
     base is an optional cairo surface that replaces the captured pixels, such
     as the selection rendered again from its PDF; annotations scale to its size.
+    remove_white clears exact white pixels after painting annotations.
     """
     if base is None:
         image = crop(selection, outputs, pixbufs)
-        if not annotations:
+        if not annotations and not remove_white:
             _, data = image.save_to_bufferv('png', [], [])
             return data
         _, data = image.save_to_bufferv('png', ['compression'], ['0'])
@@ -75,6 +94,8 @@ def render(selection, outputs, pixbufs, annotations=(), base=None):
                 context.close_path()
                 context.fill()
             context.restore()
+    if remove_white:
+        surface = remove_white_background(surface)
     buffer = io.BytesIO()
     surface.write_to_png(buffer)
     return buffer.getvalue()
