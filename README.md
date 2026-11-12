@@ -28,6 +28,7 @@ Both region bindings share the remembered selection.
 | Right-click | Clear the selection |
 | Enter, Space, double-click inside | Save, copy to clipboard, print `share` |
 | Ctrl+C | Copy to clipboard only, print `copy` |
+| T | Toggle pure white background removal |
 | Escape | Cancel, exit status 1 |
 
 The next run starts with the last saved or copied selection, like Niri's
@@ -75,6 +76,15 @@ pages per Okular window. Enter during a search waits for it, at most 35 seconds.
 
 Limits: only Okular, only a selection within one page, and only what the PDF
 itself contains. Paint is applied on top of the sharper image.
+
+## Transparent background
+
+Press T or click the eraser button after `1×` to toggle white background
+removal. It starts off each run. When enabled, every pure white pixel becomes
+transparent in the saved and copied PNG, including white annotations. Off-white
+pixels and other colors stay unchanged. This works with captures from any app
+and with the sharper PDF render from Okular. The selection label confirms when
+removal is enabled; the overlay still shows the original background.
 
 ## Usage
 

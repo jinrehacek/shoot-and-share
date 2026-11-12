@@ -81,6 +81,65 @@ class Render(unittest.TestCase):
                                  [Arrow((50, 50), (51, 51), 4, (0, 0, 0))]))
         self.assertEqual(pixel(50, 50), GRAY)
 
+    def test_white_removal_is_optional_and_exact(self):
+        output = Output('test', Rect(0, 0, 3, 2), 3, 2)
+        # Three RGB pixels leave padding at the end of each source row.
+        pixbuf = solid(3, 2, (255, 255, 255))
+        pixbufs = {'test': pixbuf}
+        annotations = [Box(Rect(1, 0, 1, 2), (254 / 255, 1, 1)),
+                       Box(Rect(2, 0, 1, 2), (1, 0, 0))]
+        original, _ = decode(render(output.rect, [output], pixbufs, annotations))
+        self.assertFalse(original.get_has_alpha())
+        image, pixel = decode(render(output.rect, [output], pixbufs, annotations,
+                                     remove_white=True))
+        for y in range(2):
+            self.assertEqual(self.alpha(image, 0, y), 0)
+            self.assertEqual(self.alpha(image, 1, y), 255)
+            self.assertEqual(self.alpha(image, 2, y), 255)
+            self.assertEqual(pixel(1, y), (254, 255, 255))
+            self.assertEqual(pixel(2, y), (255, 0, 0))
+        # Exporting with removal must leave the frozen capture intact.
+        self.assertEqual(pixbuf.get_pixels()[:3], b'\xff\xff\xff')
+
+    def test_white_capture_without_annotations_becomes_transparent(self):
+        image, _ = decode(render(Rect(0, 0, 100, 100), [self.laptop],
+                                 {'eDP-1': solid(100, 100, (255, 255, 255))},
+                                 remove_white=True))
+        self.assertEqual(self.alpha(image, 50, 50), 0)
+
+    def test_white_removal_on_pdf_base_preserves_existing_alpha(self):
+        base = cairo.ImageSurface(cairo.FORMAT_ARGB32, 8, 4)
+        context = cairo.Context(base)
+        context.set_source_rgb(1, 1, 1)
+        context.rectangle(0, 0, 2, 4)
+        context.fill()
+        context.set_source_rgba(1, 0, 0, .5)
+        context.rectangle(2, 0, 2, 4)
+        context.fill()
+        image, pixel = decode(render(Rect(0, 0, 4, 2), [], {}, base=base,
+                                     remove_white=True))
+        self.assertEqual((image.get_width(), image.get_height()), (8, 4))
+        self.assertEqual(self.alpha(image, 0, 0), 0)
+        self.assertEqual(self.alpha(image, 2, 0), 128)
+        self.assertEqual(pixel(2, 0), (255, 0, 0))
+        self.assertEqual(self.alpha(image, 7, 0), 0)
+        # Toggling back off can reuse the original PDF surface.
+        original, _ = decode(render(Rect(0, 0, 4, 2), [], {}, base=base))
+        self.assertEqual(self.alpha(original, 0, 0), 255)
+
+    def test_white_annotations_and_rgb_pdf_background_become_transparent(self):
+        base = cairo.ImageSurface(cairo.FORMAT_RGB24, 100, 100)
+        image, pixel = decode(render(Rect(0, 0, 50, 50), [], {},
+                                     [Box(Rect(10, 10, 10, 10), (1, 1, 1))], base,
+                                     remove_white=True))
+        self.assertEqual(self.alpha(image, 25, 25), 0)
+        self.assertEqual(self.alpha(image, 0, 0), 255)
+        self.assertEqual(pixel(0, 0), (0, 0, 0))
+
+    @staticmethod
+    def alpha(image, x, y):
+        return image.get_pixels()[y * image.get_rowstride() + x * 4 + 3]
+
 
 if __name__ == '__main__':
     unittest.main()

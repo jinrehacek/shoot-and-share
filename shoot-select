@@ -15,6 +15,7 @@ the brush or arrow smaller and bigger, and Ctrl+Z undoes.
 
 The 2× button (U) renders the selection again from the PDF open in Okular,
 at two or four times the screen resolution.
+T toggles removal of pure white pixels in the saved and copied PNG.
 
 Enter, Space, or a double-click inside saves the PNG, copies it to the
 clipboard, and prints "share". Ctrl+C only copies it and prints "copy".
@@ -192,6 +193,7 @@ class Session:
         self.canvases, self.windows = [], []
         self.icons = {}
         self.upscale = 1
+        self.remove_white = False
         # The PDF search for one selection: selection, process, done, result.
         self.search = None
         self.search_timer, self.search_pending = None, None
@@ -242,6 +244,7 @@ class Session:
             return []
         layout = [('tool', name) for name, _, _ in TOOLS] + [None]
         layout += [('color', index) for index in range(len(COLORS) + 1)] + [None, ('undo',), None, ('upscale',)]
+        layout += [('remove-white',)]
         width = 2 * PADDING + sum(SEPARATOR if item is None else BUTTON + GAP for item in layout) - GAP
         box = place_toolbar(self.selection, self.outputs, width, BUTTON + 2 * PADDING)
         items, x = [(('toolbar',), box)], box.x + PADDING
@@ -273,6 +276,9 @@ class Session:
             self.undo()
         elif item[0] == 'upscale':
             self.upscale = UPSCALE_STEPS[self.upscale]
+            self.redraw()
+        elif item[0] == 'remove-white':
+            self.remove_white = not self.remove_white
             self.redraw()
 
     def begin_drag(self, x, y):
@@ -542,6 +548,8 @@ class Canvas(Gtk.Widget):
             return False
         elif keyval in (Gdk.KEY_u, Gdk.KEY_U):
             session.activate(('upscale',))
+        elif keyval in (Gdk.KEY_t, Gdk.KEY_T):
+            session.activate(('remove-white',))
         elif Gdk.keyval_to_lower(keyval) in TOOL_KEYS:
             session.set_tool(TOOL_KEYS[Gdk.keyval_to_lower(keyval)])
         elif Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(COLORS) + 1:
@@ -593,7 +601,10 @@ class Canvas(Gtk.Widget):
                     snapshot.append_color(DIM, rect(part.x, part.y, part.w, part.h))
         if selection:
             self.draw_frame(snapshot, selection, handles=session.tool == 'select')
-            self.draw_label(snapshot, session.size_label(), selection.x, selection.y - 8, above=True)
+            label = session.size_label()
+            if session.remove_white:
+                label += '  ·  white becomes transparent on export'
+            self.draw_label(snapshot, label, selection.x, selection.y - 8, above=True)
             if not session.adjusting():
                 self.draw_toolbar(snapshot)
             self.draw_tool_preview(snapshot)
@@ -629,6 +640,8 @@ class Canvas(Gtk.Widget):
                       or (item[0] == 'color' and item[1] == session.color_index and session.tool != 'select'))
             if item[0] == 'upscale':
                 active = session.upscale > 1
+            elif item[0] == 'remove-white':
+                active = session.remove_white
             if item[0] != 'color' and (active or item == hovered):
                 push_rounded(snapshot, bounds, 7)
                 snapshot.append_color(ACTIVE_BUTTON if active else HOVER_BUTTON, bounds)
@@ -651,7 +664,10 @@ class Canvas(Gtk.Widget):
                 append_arrow(snapshot, arrow_shape((area.x + 10, area.y + 22), (area.x + 22, area.y + 10), 2, head=7),
                              2, WHITE)
             else:
-                name = 'edit-undo-symbolic' if item[0] == 'undo' else ICONS[item[1]]
+                if item[0] == 'remove-white':
+                    name = 'edit-clear-symbolic'
+                else:
+                    name = 'edit-undo-symbolic' if item[0] == 'undo' else ICONS[item[1]]
                 faded = item[0] == 'undo' and not session.annotations
                 snapshot.save()
                 snapshot.translate(Graphene.Point().init(area.x + 8, area.y + 8))
@@ -668,7 +684,9 @@ class Canvas(Gtk.Widget):
             text = {'tool': lambda: next(tip for tool, _, tip in TOOLS if tool == item[1]),
                     'color': lambda: f'{COLOR_NAMES[item[1]]}  {item[1] + 1}',
                     'undo': lambda: 'Undo  Ctrl+Z',
-                    'upscale': lambda: 'Sharper from the PDF open in Okular: 1×, 2×, 4×  U'}[item[0]]()
+                    'upscale': lambda: 'Sharper from the PDF open in Okular: 1×, 2×, 4×  U',
+                    'remove-white': lambda: 'Remove pure white background  T  ·  '
+                                           + ('On' if session.remove_white else 'Off')}[item[0]]()
             self.draw_label(snapshot, text, area.x, box.bottom + 6, above=False)
 
     def draw_tool_preview(self, snapshot):
@@ -844,7 +862,8 @@ def main():
         import upscale
         width, height, _ = crop_plan(session.selection, session.outputs)
         base = upscale.render_source(upscale.Source(**source), width, height, session.upscale)
-    image = render(session.selection, session.outputs, session.pixbufs, session.annotations, base)
+    image = render(session.selection, session.outputs, session.pixbufs, session.annotations, base,
+                   remove_white=session.remove_white)
     if session.action == 'share' and args.output:
         save(image, args.output)
     copy_to_clipboard(image)
