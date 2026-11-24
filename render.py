@@ -8,7 +8,7 @@ import numpy as np
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf  # noqa: E402
 
-from selection import Arrow, Box, Rect, Stroke, cover_pixels, crop_plan  # noqa: E402
+from selection import Arrow, Box, Outline, Rect, Stroke, cover_pixels, crop_plan  # noqa: E402
 
 
 def crop(selection, outputs, pixbufs):
@@ -71,6 +71,17 @@ def render(selection, outputs, pixbufs, annotations=(), base=None, remove_white=
             context.set_antialias(cairo.ANTIALIAS_NONE)
             context.rectangle(*cover_pixels(local, scale_x, scale_y))
             context.fill()
+        elif isinstance(annotation, Outline):
+            context.save()
+            context.set_antialias(cairo.ANTIALIAS_DEFAULT)
+            context.scale(scale_x, scale_y)
+            context.translate(-selection.x, -selection.y)
+            context.set_line_width(annotation.width)
+            context.set_line_join(cairo.LINE_JOIN_MITER)
+            path = annotation.path
+            context.rectangle(path.x, path.y, path.w, path.h)
+            context.stroke()
+            context.restore()
         elif isinstance(annotation, (Stroke, Arrow)):
             shape = annotation.shape if isinstance(annotation, Arrow) else None
             if isinstance(annotation, Arrow) and not shape:

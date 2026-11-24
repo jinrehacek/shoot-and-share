@@ -1,6 +1,6 @@
 import unittest
 
-from selection import (Arrow, Output, Rect, centered_span, cover_pixels, crop_plan, drag, hit_test, nudge,
+from selection import (Arrow, Outline, Output, Rect, centered_span, cover_pixels, crop_plan, drag, hit_test, nudge,
                        place_toolbar, restore, snap_angle, span_within)
 
 # The laptop layout: a 1x laptop panel and a 1.25x monitor to its right.
@@ -157,6 +157,12 @@ class CropPlan(unittest.TestCase):
 
     def test_area_outside_every_output(self):
         self.assertEqual(crop_plan(Rect(2000, 1000, 50, 50), [LAPTOP, MONITOR]), (0, 0, []))
+
+
+
+class OutlinePath(unittest.TestCase):
+    def test_path_puts_the_whole_border_outside_the_rectangle(self):
+        self.assertEqual(Outline(Rect(10, 20, 30, 40), 4, (0, 0, 0)).path, Rect(8, 18, 34, 44))
 
 
 if __name__ == '__main__':
