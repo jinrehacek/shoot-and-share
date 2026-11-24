@@ -7,7 +7,7 @@ gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf  # noqa: E402
 
 from render import render  # noqa: E402
-from selection import Arrow, Box, Output, Rect, Stroke  # noqa: E402
+from selection import Arrow, Box, Outline, Output, Rect, Stroke  # noqa: E402
 
 GRAY = (128, 128, 128)
 
@@ -80,6 +80,33 @@ class Render(unittest.TestCase):
         _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
                                  [Arrow((50, 50), (51, 51), 4, (0, 0, 0))]))
         self.assertEqual(pixel(50, 50), GRAY)
+
+    def test_outline_border_sits_outside_and_leaves_the_inside(self):
+        _, pixel = decode(render(Rect(0, 0, 100, 100), [self.laptop], self.pixbufs,
+                                 [Outline(Rect(30, 30, 40, 20), 4, (1, 0, 0))]))
+        red = (255, 0, 0)
+        # The 4 px border covers 26..30 on the left and 70..74 on the right.
+        self.assertEqual([pixel(x, 40) for x in (25, 26, 29, 30, 69, 70, 73, 74)],
+                         [GRAY, red, red, GRAY, GRAY, red, red, GRAY])
+        self.assertEqual([pixel(50, y) for y in (25, 26, 29, 30, 49, 50, 53, 54)],
+                         [GRAY, red, red, GRAY, GRAY, red, red, GRAY])
+        self.assertEqual(pixel(26, 26), red)  # Mitered, not rounded, corners.
+
+    def test_outline_scales_with_the_monitor(self):
+        _, pixel = decode(render(Rect(100, 0, 80, 80), [self.monitor], self.pixbufs,
+                                 [Outline(Rect(120, 20, 40, 40), 4, (1, 1, 1))]))
+        # Scale 1.25: the left border spans logical 18..20, pixels 22.5..25.
+        self.assertEqual(pixel(23, 50), (255, 255, 255))
+        self.assertEqual(pixel(26, 50), (0, 0, 200))
+        self.assertEqual(pixel(50, 50), (0, 0, 200))
+
+    def test_outline_on_pdf_base(self):
+        base = cairo.ImageSurface(cairo.FORMAT_RGB24, 200, 100)
+        _, pixel = decode(render(Rect(100, 200, 100, 50), [], {},
+                                 [Outline(Rect(120, 210, 60, 30), 2, (1, 1, 1))], base))
+        # Scale 2: the left border spans logical 18..20, pixels 36..40.
+        self.assertEqual([pixel(x, 50) for x in (35, 36, 39, 40)],
+                         [(0, 0, 0), (255, 255, 255), (255, 255, 255), (0, 0, 0)])
 
     def test_white_removal_is_optional_and_exact(self):
         output = Output('test', Rect(0, 0, 3, 2), 3, 2)

@@ -195,6 +195,20 @@ class Box:
 
 
 @dataclass(frozen=True)
+class Outline:
+    """A hollow rectangle whose border sits outside rect, so it never covers what it frames."""
+    rect: Rect
+    width: float
+    color: tuple
+
+    @property
+    def path(self):
+        """The rectangle to stroke with width and mitered corners, shared by the overlay and PNG renderer."""
+        half = self.width / 2
+        return Rect(self.rect.x - half, self.rect.y - half, self.rect.w + self.width, self.rect.h + self.width)
+
+
+@dataclass(frozen=True)
 class Stroke:
     """A freehand brush stroke through global logical points."""
     points: tuple
