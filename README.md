@@ -42,21 +42,23 @@ A toolbar appears under the selection. Annotations land in the saved PNG.
 | Tool | Key | Use |
 |------|-----|-----|
 | Adjust | V | Move and resize the selection (default) |
-| Box | R | Drag a solid rectangle; its edges round outward to whole pixels |
-| Outline | O | Drag a hollow rectangle; the border sits outside what you dragged around |
-| Brush | B | Paint freehand |
 | Arrow | A | Drag from tail to tip; Shift snaps to 45° |
-| Pick | I | Click to take a color from the screen, then return to the drawing tool |
+| Outline | S | Drag a hollow rectangle; the border sits outside what you dragged around |
+| Draw | D | Paint freehand |
+| Fill | F | Drag a solid rectangle; its edges round outward to whole pixels |
+| Eyedropper | E | Click to take a color from the screen, then return to the drawing tool |
+
+Every key sits under the left hand, so the right one can stay on the mouse.
 
 Q and W make the outline, brush, or arrow thinner and thicker; `[` `]` and the
 scroll wheel do the same. Keys 1–4 choose black, white, red, or the picked color.
 Arrows and outlines start red and boxes and brushes black, until you choose a
-color. Ctrl+Z undoes.
-To hide text on a colored background, pick that background and box over the text.
+color. Z or Ctrl+Z undoes.
+To hide text on a colored background, take that background with E and fill over the text with F.
 
 ## Sharper from PDFs
 
-The `1×` button at the end of the toolbar (or U) cycles through 1×, 2×, and 4×.
+The `1×` button at the end of the toolbar (or X) cycles through 1×, 2×, and 4×.
 Above 1×, shoot-select looks for the selection in the PDFs open in Okular and
 renders that area again from the PDF, so text and vector graphics stay sharp
 at two or four times the screen resolution. The size label shows the result,

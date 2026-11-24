@@ -6,15 +6,16 @@ drag the inside to move, or drag outside to start again. Hold Ctrl while
 dragging to resize around the center. Arrow keys move the selection by one
 pixel; Shift+arrows resize it; Ctrl makes steps of ten.
 
-The toolbar under the selection annotates the capture: Box (R) covers a
-rectangle, Outline (O) draws a hollow one around something, Brush (B) paints
-freehand, Arrow (A) points things out (Shift snaps it to 45 degrees), and Pick
-(I) takes a color from the screen so a cover can match its background. V
+The toolbar under the selection annotates the capture. Its keys sit under the
+left hand while the right one holds the mouse: Arrow (A) points things out
+(Shift snaps it to 45 degrees), Outline (S) draws a hollow rectangle around
+something, Draw (D) paints freehand, Fill (F) covers a rectangle, and Eyedropper
+(E) takes a color from the screen so a cover can match its background. V
 returns to adjusting the selection, 1-4 choose a color (arrows and outlines
 start red, the rest black), Q and W (or [ ] or the scroll wheel) make the
-outline, brush, or arrow thinner and thicker, and Ctrl+Z undoes.
+outline, brush, or arrow thinner and thicker, and Z or Ctrl+Z undoes.
 
-The 2× button (U) renders the selection again from the PDF open in Okular,
+The 2× button (X) renders the selection again from the PDF open in Okular,
 at two or four times the screen resolution.
 T toggles removal of pure white pixels in the saved and copied PNG.
 
@@ -33,8 +34,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from selection import (MIN_NEW_SIZE, Arrow, Box, Outline, Output, Rect, Stroke, arrow_shape, centered_span, clamp, crop_plan,
-                       drag, restore, hit_test, nudge, place_toolbar, snap_angle, span_within)
+from selection import (MIN_NEW_SIZE, Arrow, Box, Outline, Output, Rect, Stroke, arrow_shape, centered_span, clamp,
+                       crop_plan, drag, restore, hit_test, nudge, place_toolbar, snap_angle, span_within)
 
 LAYER_SHELL = 'libgtk4-layer-shell.so.0'
 CANCELLED = 1
@@ -79,18 +80,20 @@ SWATCH_RING = Gdk.RGBA(red=.6, green=.6, blue=.65, alpha=1)
 
 # Toolbar: (tool, icon, tooltip). Colors follow, then undo. Adwaita has no
 # arrow or hollow rectangle icon, so those two draw their own.
+# The order follows the keys: V, then A S D F along the home row, then E above.
 TOOLS = (('select', 'view-fullscreen-symbolic', 'Adjust selection  V'),
-         ('box', 'media-playback-stop-symbolic', 'Box  R  ·  Ctrl from center'),
-         ('outline', None, 'Outline  O  ·  Ctrl from center  ·  Q W or scroll to size'),
-         ('brush', 'document-edit-symbolic', 'Brush  B  ·  Q W or scroll to size'),
          ('arrow', None, 'Arrow  A  ·  Drag tail to tip  ·  Shift snaps  ·  Q W or scroll to size'),
-         ('pick', 'color-select-symbolic', 'Pick a color from the screen  I'))
+         ('outline', None, 'Outline  S  ·  Ctrl from center  ·  Q W or scroll to size'),
+         ('brush', 'document-edit-symbolic', 'Draw  D  ·  Q W or scroll to size'),
+         ('box', 'media-playback-stop-symbolic', 'Fill box  F  ·  Ctrl from center'),
+         ('pick', 'color-select-symbolic', 'Eyedropper: pick a color from the screen  E'))
 ICONS = {tool: icon for tool, icon, _ in TOOLS}
-TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_r: 'box', Gdk.KEY_o: 'outline', Gdk.KEY_b: 'brush', Gdk.KEY_i: 'pick',
-             Gdk.KEY_a: 'arrow'}
+# The right hand stays on the mouse, so every key is under the left one.
+TOOL_KEYS = {Gdk.KEY_v: 'select', Gdk.KEY_a: 'arrow', Gdk.KEY_s: 'outline', Gdk.KEY_d: 'brush', Gdk.KEY_f: 'box',
+             Gdk.KEY_e: 'pick'}
 DRAW_TOOLS = ('box', 'outline', 'brush', 'arrow')
 SIZED_TOOLS = ('outline', 'brush', 'arrow')  # Q, W, and the scroll wheel change their line width.
-# Q and W sit under the left hand, which also has the tool keys; [ ] still work.
+# Q and W sit above A S D F; [ ] still work.
 SIZE_KEYS = {Gdk.KEY_q: 1 / 1.25, Gdk.KEY_w: 1.25, Gdk.KEY_bracketleft: 1 / 1.25, Gdk.KEY_bracketright: 1.25}
 COLORS = ((0, 0, 0), (1, 1, 1), (.86, .2, .2))  # The picked color is the fourth swatch.
 RED = 2
@@ -200,7 +203,7 @@ class Session:
         self.pointer_output = outputs[0]
         self.tool, self.draw_tool = 'select', 'box'
         self.color_index, self.picked = 0, (.5, .5, .5)
-        self.color_chosen = False  # A swatch or Pick then applies to every tool.
+        self.color_chosen = False  # A swatch or the eyedropper then applies to every tool.
         self.widths = {'outline': 4, 'brush': 16, 'arrow': 4}
         self.annotations, self.current = [], None
         self.canvases, self.windows = [], []
@@ -561,10 +564,12 @@ class Canvas(Gtk.Widget):
             session.set_selection(nudge(session.selection, dx * step, dy * step, shift, session.bounds))
         elif control:
             return False
-        elif keyval in (Gdk.KEY_u, Gdk.KEY_U):
+        elif keyval in (Gdk.KEY_x, Gdk.KEY_X):
             session.activate(('upscale',))
         elif keyval in (Gdk.KEY_t, Gdk.KEY_T):
             session.activate(('remove-white',))
+        elif keyval in (Gdk.KEY_z, Gdk.KEY_Z):
+            session.undo()
         elif Gdk.keyval_to_lower(keyval) in TOOL_KEYS:
             session.set_tool(TOOL_KEYS[Gdk.keyval_to_lower(keyval)])
         elif Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(COLORS) + 1:
@@ -702,8 +707,8 @@ class Canvas(Gtk.Widget):
             item, area = tooltip
             text = {'tool': lambda: next(tip for tool, _, tip in TOOLS if tool == item[1]),
                     'color': lambda: f'{COLOR_NAMES[item[1]]}  {item[1] + 1}',
-                    'undo': lambda: 'Undo  Ctrl+Z',
-                    'upscale': lambda: 'Sharper from the PDF open in Okular: 1×, 2×, 4×  U',
+                    'undo': lambda: 'Undo  Z',
+                    'upscale': lambda: 'Sharper from the PDF open in Okular: 1×, 2×, 4×  X',
                     'remove-white': lambda: 'Remove pure white background  T  ·  '
                                            + ('On' if session.remove_white else 'Off')}[item[0]]()
             self.draw_label(snapshot, text, area.x, box.bottom + 6, above=False)
