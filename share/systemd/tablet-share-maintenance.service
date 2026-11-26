@@ -1,0 +1,7 @@
+[Unit]
+Description=Maintain screenshot gallery and 7/30 day retention
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/tablet-share-server maintain
+NoNewPrivileges=yes

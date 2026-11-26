@@ -1,0 +1,8 @@
+[Unit]
+Description=Retry pending screenshot uploads to the tablet gallery
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/tablet-share --retry
+TimeoutStartSec=2min
+NoNewPrivileges=yes

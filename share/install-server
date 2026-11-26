@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Install or update the gallery receiver on a server you reach over SSH.
+#
+#   share/install-server HOST GALLERY_DIR
+#
+# GALLERY_DIR is a path on the server. A relative path, or one starting with ~/,
+# is taken from your home directory there. Updating keeps every image already in it.
+set -euo pipefail
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 HOST GALLERY_DIR" >&2
+    exit 2
+fi
+host=$1 root=$2
+if [[ $root == *"'"* ]]; then
+    echo "GALLERY_DIR must not contain a single quote" >&2
+    exit 2
+fi
+source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/lib/tablet-share ~/.local/bin ~/.config/systemd/user'
+scp -q "$source_dir/server.py" "$host:.local/lib/tablet-share/server.py"
+scp -q "$source_dir/systemd/tablet-share-maintenance.service" "$source_dir/systemd/tablet-share-maintenance.timer" \
+    "$source_dir/systemd/tablet-share-web.service" "$host:.config/systemd/user/"
+ssh -o BatchMode=yes "$host" "bash -s -- '$root'" <<'REMOTE'
+set -euo pipefail
+root=$1
+case $root in
+    /*) ;;
+    "~/"*) root="$HOME/${root#"~/"}" ;;
+    *) root="$HOME/$root" ;;
+esac
+# The launcher fixes the gallery folder, so SSH uploads and the timers agree on it.
+cat > "$HOME/.local/bin/tablet-share-server" <<WRAPPER
+#!/bin/sh
+exec python3 "\$HOME/.local/lib/tablet-share/server.py" --root '$root' "\$@"
+WRAPPER
+chmod +x "$HOME/.local/bin/tablet-share-server"
+"$HOME/.local/bin/tablet-share-server" maintain
+systemctl --user daemon-reload
+systemctl --user enable --now tablet-share-maintenance.timer
+if [[ $(loginctl show-user "$USER" --property=Linger --value 2>/dev/null) != yes ]]; then
+    echo "Note: the daily cleanup only runs while you are logged in. To run it always:"
+    echo "  sudo loginctl enable-linger $USER"
+fi
+echo "Installed. Gallery folder: $root"
+REMOTE

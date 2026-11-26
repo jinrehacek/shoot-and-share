@@ -1,0 +1,29 @@
+# Publishes the gallery folder read-only. Uploads never pass through this
+# container: they arrive over SSH and tablet-share-server writes the files.
+#
+#   GALLERY_DIR=/home/me/tablet-share/gallery docker compose up -d
+#
+# GALLERY_BIND picks the address to listen on (default 127.0.0.1); see the
+# README for Tailscale, WireGuard, and LAN setups.
+name: tablet-share
+
+services:
+  gallery:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${GALLERY_BIND:-127.0.0.1}:${GALLERY_PORT:-8080}:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - "${GALLERY_DIR:?set GALLERY_DIR to the gallery folder on this machine}:/srv/gallery:ro"
+    read_only: true
+    tmpfs:
+      - /data
+      - /config
+    cap_drop:
+      - ALL
+    # The caddy binary carries this file capability and will not start without it.
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
