@@ -5,10 +5,11 @@ Settings live in ~/.config/tablet-share/config as KEY=VALUE lines; environment
 variables of the same name override them:
 
     TABLET_SHARE_HOST=myserver                      # SSH host that runs tablet-share-server
-    TABLET_SHARE_URL=https://myserver.example/      # where the gallery is served
+    TABLET_SHARE_URL=https://myserver.example/      # where the gallery is served; user:password@ for basic auth
     TABLET_SHARE_SELECTOR=/path/to/shoot-select     # optional; defaults to the one in this repository
 """
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -50,6 +52,21 @@ def load_settings(path=CONFIG, environ=os.environ):
         raise RuntimeError(f'Set {" and ".join(missing)} in {path}')
     return (settings['TABLET_SHARE_HOST'], settings['TABLET_SHARE_URL'].rstrip('/'),
             settings.get('TABLET_SHARE_SELECTOR') or str(DEFAULT_SELECTOR))
+
+
+def gallery_request(url):
+    """A GET request for url, and url without credentials for printing.
+
+    user:password@ in the URL becomes HTTP basic authentication, which urllib
+    does not send on its own, so galleries behind a password proxy can be checked.
+    """
+    parts = urllib.parse.urlsplit(url)
+    headers = {'Cache-Control': 'no-cache'}
+    if parts.username is not None:
+        token = f'{urllib.parse.unquote(parts.username)}:{urllib.parse.unquote(parts.password or "")}'
+        headers['Authorization'] = 'Basic ' + base64.b64encode(token.encode()).decode()
+        url = urllib.parse.urlunsplit(parts._replace(netloc=parts.netloc.rpartition('@')[2]))
+    return urllib.request.Request(url, headers=headers), url
 
 
 def notify(message, failure=False):
@@ -139,7 +156,7 @@ def upload(receipt, host, base_url):
     if source not in (f'history/{path.name}', f'archive/{path.name}'):
         raise RuntimeError('Server returned an invalid image path')
     url = f'{base_url}/{source}'
-    request = urllib.request.Request(url, headers={'Cache-Control': 'no-cache'})
+    request, url = gallery_request(url)
     with urllib.request.urlopen(request, timeout=12) as remote:
         if hashlib.sha256(remote.read(32 * 1024 * 1024 + 1)).hexdigest() != digest:
             raise RuntimeError('Website image checksum mismatch')

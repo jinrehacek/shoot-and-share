@@ -38,5 +38,15 @@ class SettingsTests(unittest.TestCase):
             client.load_settings(self.config, {})
 
 
+    def test_credentials_in_url_become_basic_auth(self):
+        request, shown = client.gallery_request('https://me:p%40ss@[::1]:8443/g/history/a.png')
+        self.assertEqual(shown, 'https://[::1]:8443/g/history/a.png')
+        self.assertEqual(request.full_url, shown)
+        self.assertEqual(request.get_header('Authorization'), 'Basic bWU6cEBzcw==')  # me:p@ss
+        request, shown = client.gallery_request('http://10.0.0.1:8080/history/a.png')
+        self.assertIsNone(request.get_header('Authorization'))
+        self.assertEqual(shown, 'http://10.0.0.1:8080/history/a.png')
+
+
 if __name__ == '__main__':
     unittest.main()

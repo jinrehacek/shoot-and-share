@@ -221,7 +221,9 @@ Pick whatever network you already have.
   `http://10.0.0.1:8080/`. Check that your firewall doesn't open that port to
   the internet.
 - **Public internet.** Put a reverse proxy with a password in front, such as
-  Caddy with `basic_auth`. Don't publish the port directly.
+  Caddy with `basic_auth`. Don't publish the port directly. Put the login in
+  `TABLET_SHARE_URL` in step 4, like `https://me:secret@gallery.example/`, and
+  `chmod 600` the config file.
 
 ### 4. Set up the laptop
 
@@ -245,6 +247,7 @@ If the upload fails, the PNG stays in `~/Pictures/tablet-drop/` and a pending
 record in `~/.local/state/tablet-share/`. To retry every two minutes:
 
 ```bash
+mkdir -p ~/.config/systemd/user
 cp share/systemd/tablet-share-retry.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tablet-share-retry.timer
