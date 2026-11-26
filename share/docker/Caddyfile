@@ -1,0 +1,12 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	root * /srv/gallery
+	# Pages and gallery.json change with every upload; images never do.
+	@pages not path *.png
+	header @pages Cache-Control "no-cache"
+	file_server
+}

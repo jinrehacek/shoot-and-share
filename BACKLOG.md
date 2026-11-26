@@ -15,3 +15,6 @@
 - PDF upscale for other viewers: PDF.js in Zen (no D-Bus; would need the file
   from the browser), Papers/Evince (D-Bus exposes the document URI).
 - PDF upscale for a selection spanning two pages in continuous mode.
+- `tablet-share --retry` stops at the first failing receipt, so one screenshot
+  that was deleted locally or rejected by the server blocks the rest of the
+  queue. Tell connection failures from per-image ones, and set aside the latter.

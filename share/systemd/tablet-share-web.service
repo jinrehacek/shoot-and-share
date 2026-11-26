@@ -1,0 +1,15 @@
+[Unit]
+Description=Serve the screenshot gallery over HTTP
+# Listens on 127.0.0.1:8080 by default. To listen on a WireGuard or LAN address
+# instead, run `systemctl --user edit tablet-share-web` and override ExecStart:
+#   [Service]
+#   ExecStart=
+#   ExecStart=%h/.local/bin/tablet-share-server serve --bind 10.0.0.1 --port 8080
+
+[Service]
+ExecStart=%h/.local/bin/tablet-share-server serve --bind 127.0.0.1 --port 8080
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

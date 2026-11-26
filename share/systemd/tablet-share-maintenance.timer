@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily screenshot gallery cleanup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=5m
+Unit=tablet-share-maintenance.service
+
+[Install]
+WantedBy=timers.target

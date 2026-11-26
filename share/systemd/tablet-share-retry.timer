@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry screenshot uploads every two minutes
+
+[Timer]
+OnStartupSec=2min
+OnUnitInactiveSec=2min
+Unit=tablet-share-retry.service
+
+[Install]
+WantedBy=timers.target

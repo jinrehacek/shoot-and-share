@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Select a region with shoot-select and upload it to your screenshot gallery over SSH.
+
+Settings live in ~/.config/tablet-share/config as KEY=VALUE lines; environment
+variables of the same name override them:
+
+    TABLET_SHARE_HOST=myserver                      # SSH host that runs tablet-share-server
+    TABLET_SHARE_URL=https://myserver.example/      # where the gallery is served; user:password@ for basic auth
+    TABLET_SHARE_SELECTOR=/path/to/shoot-select     # optional; defaults to the one in this repository
+"""
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+import urllib.parse
+import urllib.request
+import uuid
+
+CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'tablet-share' / 'config'
+STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'tablet-share'
+PICTURES = Path.home() / 'Pictures/tablet-drop'
+# This script lives in share/ next to the repository's shoot-select, even when run through a symlink.
+DEFAULT_SELECTOR = Path(__file__).resolve().parent.parent / 'shoot-select'
+
+
+def load_settings(path=CONFIG, environ=os.environ):
+    """(host, gallery URL, selector) from the config file and the environment."""
+    settings = {}
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    for number, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        key, separator, value = line.partition('=')
+        if not separator:
+            raise RuntimeError(f'{path}:{number}: expected KEY=VALUE')
+        settings[key.strip()] = value.strip().strip('"\'')
+    settings.update((key, value) for key, value in environ.items() if key.startswith('TABLET_SHARE_'))
+    missing = [key for key in ('TABLET_SHARE_HOST', 'TABLET_SHARE_URL') if not settings.get(key)]
+    if missing:
+        raise RuntimeError(f'Set {" and ".join(missing)} in {path}')
+    return (settings['TABLET_SHARE_HOST'], settings['TABLET_SHARE_URL'].rstrip('/'),
+            settings.get('TABLET_SHARE_SELECTOR') or str(DEFAULT_SELECTOR))
+
+
+def gallery_request(url):
+    """A GET request for url, and url without credentials for printing.
+
+    user:password@ in the URL becomes HTTP basic authentication, which urllib
+    does not send on its own, so galleries behind a password proxy can be checked.
+    """
+    parts = urllib.parse.urlsplit(url)
+    headers = {'Cache-Control': 'no-cache'}
+    if parts.username is not None:
+        token = f'{urllib.parse.unquote(parts.username)}:{urllib.parse.unquote(parts.password or "")}'
+        headers['Authorization'] = 'Basic ' + base64.b64encode(token.encode()).decode()
+        url = urllib.parse.urlunsplit(parts._replace(netloc=parts.netloc.rpartition('@')[2]))
+    return urllib.request.Request(url, headers=headers), url
+
+
+def notify(message, failure=False):
+    print(message, file=sys.stderr)
+    try:
+        environment = os.environ.copy()
+        # AppImage launchers can export their bundled libnotify, which is
+        # incompatible with Fedora's notify-send.
+        environment.pop('LD_LIBRARY_PATH', None)
+        environment.pop('LD_PRELOAD', None)
+        subprocess.run(['notify-send', '-a', 'Tablet share', '-u', 'normal' if failure else 'low',
+                        'Screenshot share', message], env=environment, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def select(selector, path):
+    """Open the region selector; return 'share', 'copy', or None when cancelled."""
+    # Without a timeout: the selector stays open until Enter, Ctrl+C, or Escape.
+    result = subprocess.run([selector, '--output', str(path)], capture_output=True, text=True, check=False)
+    if result.returncode == 1:
+        return None
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f'shoot-select exited with {result.returncode}')
+    return result.stdout.strip()
+
+
+def capture_window(path):
+    """Subscribe before opening capture, then wait for this exact completed PNG."""
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(5)
+        connection.connect(os.environ['NIRI_SOCKET'])
+        connection.sendall(b'"EventStream"\n')
+        stream = connection.makefile('rb')
+        try:
+            reply = json.loads(stream.readline())
+            if reply != {'Ok': 'Handled'}:
+                raise RuntimeError(f'Niri rejected event subscription: {reply}')
+            subprocess.run(['niri', 'msg', 'action', 'screenshot-window', '--path', str(path)],
+                           check=True, capture_output=True, timeout=10)
+            deadline = time.monotonic() + 300
+            # Niri sends this event after encoding and writing the file, not when
+            # the screenshot UI opens. No directory scans or arbitrary sleeps.
+            while time.monotonic() < deadline:
+                connection.settimeout(max(.1, deadline - time.monotonic()))
+                try:
+                    line = stream.readline()
+                except TimeoutError:
+                    return False  # Escape cancels without emitting a capture event.
+                if not line:
+                    raise RuntimeError('Niri event stream disconnected')
+                event = json.loads(line)
+                if event.get('ScreenshotCaptured', {}).get('path') == str(path):
+                    return True
+            return False
+        finally:
+            stream.close()
+
+
+def queue(path):
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt = STATE / (path.stem + '.json')
+    temporary = receipt.with_suffix('.tmp')
+    temporary.write_text(json.dumps(dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())))
+    temporary.replace(receipt)
+    return receipt
+
+
+def upload(receipt, host, base_url):
+    record = json.loads(receipt.read_text())
+    path, digest = Path(record['path']), record['sha256']
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise RuntimeError(f'Local screenshot changed: {path}')
+    result = subprocess.run(
+        ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
+         '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', host,
+         f'~/.local/bin/tablet-share-server receive {path.name} {digest}'],
+        input=data, capture_output=True, timeout=45, check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode(errors='replace').strip() or 'SSH upload failed')
+    response = json.loads(result.stdout)
+    if response.get('sha256') != digest or response.get('name') != path.name:
+        raise RuntimeError('Server did not confirm the uploaded image')
+    # Verify the actual site delivers these bytes before marking the upload done.
+    source = response.get('src')
+    if source not in (f'history/{path.name}', f'archive/{path.name}'):
+        raise RuntimeError('Server returned an invalid image path')
+    url = f'{base_url}/{source}'
+    request, url = gallery_request(url)
+    with urllib.request.urlopen(request, timeout=12) as remote:
+        if hashlib.sha256(remote.read(32 * 1024 * 1024 + 1)).hexdigest() != digest:
+            raise RuntimeError('Website image checksum mismatch')
+    receipt.unlink(missing_ok=True)
+    print(url)
+    return url
+
+
+def retry(host, base_url):
+    failures, count = [], 0
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # The timer and manual retries may overlap, but uploads remain idempotent.
+    with (STATE / 'retry.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        for receipt in sorted(STATE.glob('*.json')):
+            try:
+                upload(receipt, host, base_url)
+                count += 1
+            except Exception as error:
+                failures.append(str(error))
+                print(f'Pending {receipt.stem}: {error}', file=sys.stderr)
+                break  # Don't attempt an entire queue while the server is offline.
+    if count:
+        notify(f'Shared {count} pending screenshot(s).')
+    return bool(failures)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--retry', action='store_true', help='Retry pending uploads')
+    group.add_argument('--file', type=Path, help='Share an existing PNG')
+    group.add_argument('--window', action='store_true', help='Share the focused window without the selection UI')
+    args = parser.parse_args()
+    # Fail before the selector opens, not after a capture that cannot go anywhere.
+    host, base_url, selector = load_settings()
+    if args.retry:
+        return retry(host, base_url)
+    PICTURES.mkdir(parents=True, exist_ok=True)
+    name = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S-%f-') + uuid.uuid4().hex[:8] + '.png'
+    path = PICTURES / name
+    if args.file:
+        path.write_bytes(args.file.read_bytes())
+    elif args.window:
+        if not capture_window(path):
+            return 0
+    elif select(selector, path) != 'share':
+        return 0  # Cancelled, or Ctrl+C copied the region without sharing it.
+    receipt = queue(path)
+    try:
+        upload(receipt, host, base_url)
+    except Exception as error:
+        notify(f'Saved locally; upload pending. Automatic retry in 2 minutes. {error}', failure=True)
+        return 1
+    notify('Shared to the gallery.')
+    # The selector and Niri keep the PNG in the laptop clipboard; uploading does not replace it.
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as error:
+        notify(f'Screenshot share failed: {error}', failure=True)
+        sys.exit(1)
