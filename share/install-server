@@ -38,7 +38,8 @@ chmod +x "$HOME/.local/bin/tablet-share-server"
 systemctl --user daemon-reload
 systemctl --user enable --now tablet-share-maintenance.timer
 if [[ $(loginctl show-user "$USER" --property=Linger --value 2>/dev/null) != yes ]]; then
-    echo "Note: the daily cleanup only runs while you are logged in. To run it always:"
+    echo "Note: lingering is off, so the daily cleanup and tablet-share-web only run"
+    echo "while you are logged in. To keep them running:"
     echo "  sudo loginctl enable-linger $USER"
 fi
 echo "Installed. Gallery folder: $root"

@@ -141,8 +141,7 @@ up. Parts outside every monitor are transparent.
 
 ## Share to a gallery
 
-I wanted screenshots from the laptop on my tablet, to drag into notes. With the
-gallery set up, a second key runs `tablet-share`: you select a region as usual,
+I wanted screenshots from the laptop on my tablet. With the gallery set up, a second key runs `tablet-share`: you select a region as usual,
 Enter uploads it, and a page on your server shows it a few seconds later.
 
 ```text
@@ -197,9 +196,11 @@ It runs Caddy with the folder mounted read-only, on `127.0.0.1:8080`.
 **Without Docker.** The installer also put a small web server on the server:
 
 ```bash
+ssh myserver 'sudo loginctl enable-linger $USER'   # keep it running after you log out
 ssh myserver systemctl --user enable --now tablet-share-web
 ```
 
+Without lingering, systemd stops it as soon as your last SSH session closes.
 It also listens on `127.0.0.1:8080`. `systemctl --user edit tablet-share-web`
 changes that; the unit file shows how.
 
@@ -212,6 +213,8 @@ Pick whatever network you already have.
 
 - **Tailscale.** On the server, `sudo tailscale serve --bg 8080`. The gallery is
   at `https://myserver.your-tailnet.ts.net/`, with HTTPS, only on your tailnet.
+  If something already uses that address, add `--https=8443` and append
+  `:8443` to the URL.
 - **WireGuard or LAN.** Listen on the server's address in that network instead
   of 127.0.0.1, for example `GALLERY_BIND=10.0.0.1` for Docker or
   `--bind 10.0.0.1` for `tablet-share-web`. The gallery is at
